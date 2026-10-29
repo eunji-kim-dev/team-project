@@ -1,0 +1,59 @@
+{
+  "input_size": [
+    480,
+    640
+  ],
+  "mean": [
+    123.675,
+    116.28,
+    103.53
+  ],
+  "std": [
+    58.395,
+    57.12,
+    57.375
+  ],
+  "color_order": "RGB",
+  "num_classes": 3,
+  "input_range": 255.0,
+  "normalize_in_graph": true,
+  "argmax_in_graph": true,
+  "onnx_input": "input",
+  "onnx_output": "mask",
+  "opset": 17,
+  "torch_version": "2.15.0+cpu",
+  "source_ckpt": "checkpoints/best_mIoU_iter_1600.pth",
+  "ckpt_iter": 1600,
+  "exported_at": "2026-10-29 16:42:46",
+  "verify": {
+    "mask_agreement_pct": 100.0
+  },
+  "classes": [
+    "floor",
+    "obstacle",
+    "other"
+  ],
+  "source_onnx": "models/fast_scnn.onnx",
+  "built_at": "2026-10-29 17:39:15",
+  "build": {
+    "precision": "fp32",
+    "build_seconds": 54.3,
+    "engine_size_mb": 7.04,
+    "trt_version": "10.16.2.10",
+    "workspace_mb": 2048,
+    "tf32": false,
+    "layer_precisions": {
+      "FP32": 90,
+      "INT32": 1,
+      "total_layers": 91
+    },
+    "check": {
+      "infer_ms_p50": 5.35,
+      "class_ratio": [
+        0.0579,
+        0.9421,
+        0.0
+      ]
+    }
+  }
+}
