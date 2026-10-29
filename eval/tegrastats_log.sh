@@ -12,6 +12,7 @@ set -euo pipefail
 
 CMD="${1:-}"
 LOG="${2:-results/tegrastats_$(date +%m%d_%H%M%S).log}"
+LOG="$(realpath -m "$LOG")"           # 절대경로로. tegrastats 는 백그라운드 데몬이라 상대경로가 엉뚱한 데 써질 수 있음
 INTERVAL_MS="${INTERVAL_MS:-1000}"   # 기록 간격
 
 SUDO=""

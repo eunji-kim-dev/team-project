@@ -48,36 +48,28 @@ def summarize(window: list[float], budget_ms: float) -> dict:
             "over_budget": int((arr > budget_ms).sum())}   # 한 프레임 간격 안에 못 끝낸 수
 
 
-def main():
-    parser = argparse.ArgumentParser(description="장시간 실행 안정성 테스트")
-    parser.add_argument("--model", required=True, type=Path)
-    parser.add_argument("--images", required=True, type=Path)
-    parser.add_argument("--list", type=Path, default=None)
-    parser.add_argument("--img-suffix", default="_color.png")
-    parser.add_argument("--minutes", type=float, default=10.0)
-    parser.add_argument("--target-fps", type=float, default=30.0, help="카메라 속도. 0 이면 최대 속도")
-    parser.add_argument("--out", type=Path, default=Path("results/soak"))
-    args = parser.parse_args()
+def run_soak(model: Path, frames: list, minutes: float, target_fps: float, out: Path, quiet: bool = False) -> dict:
+    """모델 하나를 minutes 동안 target_fps 로 돌리고 요약 dict 반환. soak.csv / soak_summary.json 도 저장"""
+    budget_ms = 1000.0 / target_fps if target_fps > 0 else 33.3
+    frame_period = 1.0 / target_fps if target_fps > 0 else 0.0
+    out.mkdir(parents=True, exist_ok=True)
 
-    frames = load_frames(args.images, args.list, args.img_suffix)
-    budget_ms = 1000.0 / args.target_fps if args.target_fps > 0 else 33.3
-    frame_period = 1.0 / args.target_fps if args.target_fps > 0 else 0.0
-    args.out.mkdir(parents=True, exist_ok=True)
-
-    kwargs = {"providers": ["CPUExecutionProvider"]} if args.model.suffix == ".onnx" else {}
-    seg = create_segmenter(args.model, **kwargs)
+    kwargs = {"providers": ["CPUExecutionProvider"]} if model.suffix == ".onnx" else {}
+    seg = create_segmenter(model, **kwargs)
     for i in range(20):   # 워밍업
         seg.segment(frames[0], i)
 
-    print(f"[soak] {args.model.name}, {args.minutes} 분, 목표 {args.target_fps} fps (프레임 간격 {budget_ms:.1f} ms)")
+    if not quiet:
+        print(f"[soak] {model.name}, {minutes} 분, 목표 {target_fps} fps (프레임 간격 {budget_ms:.1f} ms)")
     rows = []            # 10초 단위 요약
     window = []          # 현재 10초 동안의 지연
     all_latency = []
     started = time.perf_counter()
+    wall_start = time.time()
     next_report = started + REPORT_EVERY_S
     next_due = started
     frame_id = 0
-    while time.perf_counter() - started < args.minutes * 60:
+    while time.perf_counter() - started < minutes * 60:
         if frame_period:
             now = time.perf_counter()
             if now < next_due:
@@ -93,10 +85,12 @@ def main():
         if time.perf_counter() >= next_report:
             row = {"t_s": round(time.perf_counter() - started), **summarize(window, budget_ms)}
             rows.append(row)
-            print(f"  {row['t_s']:>5}s  p50 {row['p50_ms']:.2f}  p95 {row['p95_ms']:.2f}  max {row['max_ms']:.2f} ms  "
-                  f"놓친 프레임 {row['over_budget']}/{row['frames']}")
+            if not quiet:
+                print(f"  {row['t_s']:>5}s  p50 {row['p50_ms']:.2f}  p95 {row['p95_ms']:.2f}  max {row['max_ms']:.2f} ms  "
+                      f"놓친 프레임 {row['over_budget']}/{row['frames']}")
             window = []
             next_report += REPORT_EVERY_S
+    elapsed_s = time.perf_counter() - started
     seg.close()
 
     # 처음 1분 vs 마지막 1분
@@ -104,8 +98,10 @@ def main():
     first = [r["p50_ms"] for r in rows[:per_min]]
     last = [r["p50_ms"] for r in rows[-per_min:]]
     summary = {
-        "model": str(args.model), "minutes": args.minutes, "target_fps": args.target_fps,
+        "model": str(model), "minutes": minutes, "target_fps": target_fps,
         "total_frames": frame_id,
+        "achieved_fps": round(frame_id / elapsed_s, 1),   # 실제로 처리한 속도 (목표에 못 미치면 여기서 보임)
+        "wall_start": wall_start, "wall_end": time.time(),
         "p50_ms_all": round(float(np.percentile(all_latency, 50)), 2),
         "p95_ms_all": round(float(np.percentile(all_latency, 95)), 2),
         "max_ms_all": round(float(np.max(all_latency)), 2),
@@ -117,15 +113,31 @@ def main():
         drift = (summary["p50_last_minute"] - summary["p50_first_minute"]) / summary["p50_first_minute"] * 100
         summary["drift_pct"] = round(drift, 1)   # +면 느려진 것. 10% 넘으면 스로틀링 의심 → tegrastats 의 GPU 클럭 확인
 
-    with open(args.out / "soak.csv", "w", newline="", encoding="utf-8") as f:
+    with open(out / "soak.csv", "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()) if rows else ["t_s"])
         writer.writeheader()
         writer.writerows(rows)
-    (args.out / "soak_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"\n[soak] 총 {frame_id} 프레임, p50 {summary['p50_ms_all']} ms, 놓친 프레임 {summary['over_budget_total']}, "
-          f"처음 1분 {summary['p50_first_minute']} → 마지막 1분 {summary['p50_last_minute']} ms"
-          + (f" (변화 {summary['drift_pct']:+.1f}%)" if "drift_pct" in summary else ""))
-    print(f"[done] {args.out}/soak.csv, soak_summary.json")
+    (out / "soak_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    if not quiet:
+        print(f"\n[soak] 총 {frame_id} 프레임, p50 {summary['p50_ms_all']} ms, 놓친 프레임 {summary['over_budget_total']}, "
+              f"처음 1분 {summary['p50_first_minute']} → 마지막 1분 {summary['p50_last_minute']} ms"
+              + (f" (변화 {summary['drift_pct']:+.1f}%)" if "drift_pct" in summary else ""))
+        print(f"[done] {out}/soak.csv, soak_summary.json")
+    return summary
+
+
+def main():
+    parser = argparse.ArgumentParser(description="장시간 실행 안정성 테스트")
+    parser.add_argument("--model", required=True, type=Path)
+    parser.add_argument("--images", required=True, type=Path)
+    parser.add_argument("--list", type=Path, default=None)
+    parser.add_argument("--img-suffix", default="_color.png")
+    parser.add_argument("--minutes", type=float, default=10.0)
+    parser.add_argument("--target-fps", type=float, default=30.0, help="카메라 속도. 0 이면 최대 속도")
+    parser.add_argument("--out", type=Path, default=Path("results/soak"))
+    args = parser.parse_args()
+    frames = load_frames(args.images, args.list, args.img_suffix)
+    run_soak(args.model, frames, args.minutes, args.target_fps, args.out)
 
 
 if __name__ == "__main__":
