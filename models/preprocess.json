@@ -1,0 +1,21 @@
+{
+  "input_size": [
+    480,
+    640
+  ],
+  "mean": [
+    123.675,
+    116.28,
+    103.53
+  ],
+  "std": [
+    58.395,
+    57.12,
+    57.375
+  ],
+  "color_order": "RGB",
+  "num_classes": 3,
+  "input_range": 255.0,
+  "normalize_in_graph": false,
+  "argmax_in_graph": null
+}
