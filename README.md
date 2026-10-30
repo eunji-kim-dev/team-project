@@ -13,6 +13,7 @@ team-project/
 │   ├─ segmenter.py       추론 모듈. .onnx → onnxruntime, .engine → TensorRT 자동 선택
 │   ├─ qat_train.py       QAT INT8 학습 → Q/DQ ONNX   (quant.py, trt_scales.py 가 보조)
 │   ├─ inspect_engine.py  엔진 레이어 정보 추출
+│   ├─ profile_engine.py  엔진 층별 실행 시간·정밀도 프로파일 (엔진 간 속도 차이 원인 분석)
 │   ├─ qat_sensitivity.py 블록별 양자화 진단
 │   ├─ preprocess.py      입력 전처리 공통 (리사이즈·채널 순서·정규화)
 │   ├─ cuda_util.py       CUDA 메모리·스트림 얇은 래퍼
