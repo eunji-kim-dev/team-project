@@ -15,8 +15,11 @@ from .recording import VideoRecorder
 WINDOW="D435 v3.5 | RGB / SCNN / COSTMAP / Low Angle / High Angle"
 
 def window_open():
-    try:return cv2.getWindowProperty(WINDOW,cv2.WND_PROP_VISIBLE)>=1
+    try:visible=cv2.getWindowProperty(WINDOW,cv2.WND_PROP_VISIBLE)
     except cv2.error:return False
+    # [Jetson] GTK 백엔드 OpenCV(JetPack 4.8.0)는 WND_PROP_VISIBLE을 지원하지 않아 창이 열려 있어도 -1을 돌려준다.
+    # 음수는 '판별 불가'로 보고 열린 창으로 취급한다(종료는 Q/Esc). 0(Qt/Win32의 닫힘)만 닫힌 창으로 본다.
+    return visible<0 or visible>=1
 
 def request_save(saver,root,snapshot,session,cfg,acquisition_health,processing_health):
     # [v3.5] S 시점의 표시 완료 프레임을 고정. 최신 RGB를 별도로 섞지 않는다.
