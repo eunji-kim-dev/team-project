@@ -34,7 +34,6 @@ import copy
 import dataclasses
 import json
 import re
-import struct
 import sys
 import time
 from pathlib import Path
@@ -48,27 +47,12 @@ from deploy.export_onnx import (ExportWrapper, build_from_model_py, export, free
                                 load_checkpoint, simplify_and_check, spec_from_mmseg_cfg)
 from deploy.preprocess import ModelSpec, load_spec, save_spec  # noqa: E402
 from deploy.qat_train import DEFAULT_PALETTE_RGB, IGNORE, RGBMaskDataset, read_split  # noqa: E402
+from deploy.trt_scales import node_to_module, onnx_conv_inputs, read_calib_cache, short_name  # noqa: E402,F401
 
 CLASS_KO = {"floor": "바닥", "obstacle": "장애물", "other": "그 외"}
 
 
 # ---------- 이름 ----------
-
-def short_name(conv_name: str) -> str:
-    """QuantConv2d 모듈 이름 → 표에 쓰는 짧은 이름
-    core.backbone.learning_to_downsample.dsconv1.depthwise_conv.conv → LTD.dsconv1.depthwise_conv"""
-    name = conv_name
-    for prefix, short in (("core.backbone.learning_to_downsample.", "LTD."),
-                          ("core.backbone.global_feature_extractor.", "GFE."),
-                          ("core.backbone.feature_fusion.", "FFM."),
-                          ("core.decode_head.", "HEAD.")):
-        if name.startswith(prefix):
-            name = short + name[len(prefix):]
-            break
-    if name.endswith(".conv"):
-        name = name[:-5]
-    return name
-
 
 def block_of(conv_name: str) -> str:
     s = short_name(conv_name)
@@ -102,18 +86,6 @@ def stage_of(block: str) -> str:
     if block.startswith("HEAD"):
         return "HEAD"
     return block
-
-
-def node_to_module(node_name: str) -> str:
-    """ONNX 노드 이름 → 모듈 이름. torch export 는 Sequential 자식을 '부모/부모.번호' 로 적으므로 앞부분을 떼어 냄
-    /core/backbone/.../bottleneck1/bottleneck1.0/conv/conv.0/conv/Conv → core.backbone....bottleneck1.0.conv.0.conv"""
-    raw = node_name.strip("/").split("/")[:-1]
-    parts = []
-    for prev, segment in zip([None] + raw[:-1], raw):
-        if prev is not None and segment.startswith(prev + "."):
-            segment = segment[len(prev) + 1:]
-        parts.append(segment)
-    return ".".join(parts)
 
 
 # ---------- 모델 ----------
@@ -170,18 +142,9 @@ def load_from_qdq_onnx(model, onnx_path: Path, load_weights: bool) -> dict:
 
 
 def load_trt_entropy_scales(calib_path: Path, fp32_onnx: Path) -> dict[str, float]:
-    """TensorRT 캘리브레이션 캐시(텐서 이름: scale 의 hex) + FP32 ONNX 의 conv 입력 텐서 이름 → 모듈 이름별 scale"""
-    import onnx
-    cache = {}
-    for line in calib_path.read_text(encoding="utf-8", errors="replace").splitlines()[1:]:
-        if ":" in line:
-            name, hexval = line.rsplit(":", 1)
-            cache[name.strip()] = struct.unpack("!f", bytes.fromhex(hexval.strip()))[0]
-    scales = {}
-    for node in onnx.load(str(fp32_onnx)).graph.node:
-        if node.op_type == "Conv" and node.input[0] in cache:
-            scales[node_to_module(node.name)] = cache[node.input[0]]
-    return scales
+    """TensorRT 캘리브레이션 캐시 + FP32 ONNX 의 conv 입력 텐서 이름 → 모듈 이름별 scale (deploy.trt_scales 와 같은 대응)"""
+    _, cache = read_calib_cache(calib_path)
+    return {name: cache[info["tensor"]] for name, info in onnx_conv_inputs(fp32_onnx).items() if info["tensor"] in cache}
 
 
 # ---------- 데이터 ----------

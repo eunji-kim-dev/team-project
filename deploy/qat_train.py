@@ -2,12 +2,20 @@
 
 python -m deploy.qat_train --ckpt checkpoints/best_mIoU_iter_1600.pth --data-root data \\
     --out models/fast_scnn_qat.onnx --iters 300 --lr 1e-4 --batch 4
+# 활성화 scale 을 TensorRT PTQ 캘리브레이션 캐시 값으로 (PTQ 와 같은 정확도에서 시작. 권장)
+python -m deploy.qat_train --ckpt checkpoints/best_mIoU_iter_1600.pth --data-root data \\
+    --out models/calib_trt/fast_scnn_qat.onnx --iters 300 --trt-calib models/fast_scnn_int8_entropy.calib
 
 순서
   [1] FP32 val mIoU 측정 (기준)
   [2] BN 을 conv 에 접음 → [1] 과 같아야 정상
   [3] conv 전부 QuantConv2d 로 바꾸고 학습 사진 몇 배치로 scale 캘리브레이션 → val mIoU (PTQ 흉내)
-  [4] 가짜 양자화 켠 채 낮은 lr 로 학습, 주기적으로 val, 제일 좋은 가중치 보관
+      --trt-calib <캐시> 를 주면 활성화 scale 을 TensorRT PTQ 캘리브레이션 캐시 값으로 바꿈 (deploy/trt_scales.py 가 conv 입력과
+      캐시 항목의 대응을 검사하고, 쓴 scale 과 캐시 출처를 <out>.json 에 남김). EMA/max 는 LTD.dsconv1 의 scale 을 2배 크게
+      잡아 INT8 손상이 남으므로 (docs/quant_sensitivity.md) 이쪽을 권장
+  [4] 가짜 양자화 켠 채 낮은 lr 로 학습, 주기적으로 val. 후보 = 학습 전(0 iter) 모델 + eval 때마다의 가중치.
+      장애물→바닥% 가 학습 전 모델보다 늘지 않은 후보 중 mIoU 최고를 고름 (--obs-floor-tol. inf 면 예전처럼 mIoU 만 봄)
+      → 학습 결과가 기준보다 나쁘면 억지로 학습된 가중치를 쓰지 않고 학습 전 모델이 그대로 나감
   [5] Q/DQ ONNX 로 내보내고 onnxruntime 과 비교 → models/fast_scnn_qat.onnx (+ .json)
   → Jetson: python -m deploy.build_engine --onnx models/fast_scnn_qat.onnx --precision qat
 
@@ -33,7 +41,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from deploy import quant  # noqa: E402
+from deploy import quant, trt_scales  # noqa: E402
 from deploy.export_onnx import (ExportWrapper, build_from_model_py, export, freeze_adaptive_pools,  # noqa: E402
                                 load_checkpoint, simplify_and_check, spec_from_mmseg_cfg)
 from deploy.preprocess import ModelSpec, load_spec, save_spec  # noqa: E402
@@ -150,7 +158,7 @@ def make_calibration_loader(train_loader: DataLoader, no_aug: bool) -> DataLoade
 
 @torch.no_grad()
 def evaluate(model: nn.Module, loader: DataLoader, num_classes: int, device) -> dict:
-    """val 전체의 혼동행렬 → mIoU, 클래스별 IoU, 픽셀 정확도"""
+    """val 전체의 혼동행렬 → mIoU, 클래스별 IoU, 픽셀 정확도, 장애물→바닥%(정답 장애물 중 바닥으로 찍은 비율), 바닥→장애물%"""
     model.eval()
     confusion = torch.zeros(num_classes, num_classes, dtype=torch.int64)
     for x, y in loader:
@@ -162,15 +170,23 @@ def evaluate(model: nn.Module, loader: DataLoader, num_classes: int, device) -> 
     inter = confusion.diag().double()
     union = confusion.sum(0).double() + confusion.sum(1).double() - inter
     iou = torch.where(union > 0, inter / union, torch.full_like(inter, float("nan")))
-    return {
+    result = {
         "miou": float(torch.nanmean(iou)),
         "iou": [None if torch.isnan(v) else round(float(v), 4) for v in iou],
         "pixel_acc": float(inter.sum() / confusion.sum().clamp_min(1)),
+        "confusion": confusion.tolist(),   # [정답][예측]
     }
+    if num_classes >= 2:   # 0 floor, 1 obstacle (eval.bench_engines 와 같은 정의)
+        result["obstacle_to_floor_pct"] = float(confusion[1, 0] / confusion[1].sum().clamp_min(1) * 100)
+        result["floor_to_obstacle_pct"] = float(confusion[0, 1] / confusion[0].sum().clamp_min(1) * 100)
+    return result
 
 
 def fmt(result: dict) -> str:
-    return f"mIoU {result['miou']:.4f}  IoU {result['iou']}  acc {result['pixel_acc']:.4f}"
+    text = f"mIoU {result['miou']:.4f}  IoU {result['iou']}  acc {result['pixel_acc']:.4f}"
+    if "obstacle_to_floor_pct" in result:
+        text += f"  장→바 {result['obstacle_to_floor_pct']:.3f}%  바→장 {result['floor_to_obstacle_pct']:.3f}%"
+    return text
 
 
 # ---------- QAT 흐름 ----------
@@ -187,6 +203,8 @@ class QatTrainer:
         self.results: dict[str, dict] = {}
         self.n_fused = 0       # 접은 BN 개수
         self.n_quant = 0       # QuantConv2d 개수
+        self.act_calib: dict = {}   # 활성화 scale 을 어떻게 정했나 (EMA/max 배치 수, TensorRT 캐시 출처·scale)
+        self.selection: dict = {}   # [4] 후보별 mIoU·장→바 와 선택 결과
         self.model: nn.Module | None = None
         self.train_loader: DataLoader | None = None
         self.val_loader: DataLoader | None = None
@@ -235,18 +253,62 @@ class QatTrainer:
               f"seed={self.args.seed}")
         calib_batches = (x for i, (x, _) in zip(range(self.args.calib_batches), calib_loader))
         quant.calibrate(self.model, calib_batches, self.device)
+        self.act_calib = dict(method=self.args.calib_method, batches=n_calib_batches,
+                              images=n_calib_batches * self.args.batch, augmentation=not self.args.calib_no_aug, trt=None)
+        trt_calib = getattr(self.args, "trt_calib", None)   # 옛 args(deploy.qat_sensitivity 등)로 불러도 되게
+        if trt_calib is not None:
+            self._import_trt_scales(Path(trt_calib))
         print(f"[3] {quant.quant_summary(self.model)}")
         self._eval("ptq_sim", "[3] PTQ 흉내        ")
 
+    def _import_trt_scales(self, calib_path: Path):
+        """활성화 scale 을 TensorRT PTQ 캘리브레이션 캐시 값으로 바꿈. 대응(conv 입력 텐서 ↔ 캐시 항목, 가중치 모양)은
+        trt_scales.match_trt_scales 가 검사하고 하나라도 못 맞추면 멈춤. 쓴 scale 과 캐시 출처는 self.act_calib 에 (→ <out>.json)"""
+        args = self.args
+        fp32_onnx = getattr(args, "trt_fp32_onnx", None) or trt_scales.default_fp32_onnx(calib_path)
+        before = {name: float(module.input_quant.scale) for name, module in quant.named_quant_convs(self.model)}
+        matched = trt_scales.match_trt_scales(self.model, calib_path, fp32_onnx)
+        applied = trt_scales.apply_trt_scales(self.model, matched, getattr(args, "trt_scale_convs", None))
+        print("[trt] " + trt_scales.describe(matched, applied, before).replace("\n", "\n      "))
+
+        fp32_json = fp32_onnx.with_suffix(fp32_onnx.suffix + ".json")   # 캐시를 만든 ONNX 가 같은 체크포인트에서 나왔는지
+        onnx_ckpt = json.loads(fp32_json.read_text(encoding="utf-8")).get("source_ckpt") if fp32_json.exists() else None
+        if onnx_ckpt and Path(onnx_ckpt).name != args.ckpt.name:
+            print(f"[trt] 주의: FP32 ONNX 의 체크포인트 {onnx_ckpt} ≠ --ckpt {args.ckpt} → scale 이 다른 가중치 기준일 수 있음")
+
+        applied_set = set(applied)
+        all_applied = len(applied) == len(matched["scales"])
+        self.act_calib["method"] = (f"trt_{matched['cache'].get('calib_type', 'cache')}" if all_applied
+                                    else f"{self.act_calib['method']}+trt({len(applied)})")
+        self.act_calib["trt"] = dict(
+            cache=matched["cache"], fp32_onnx=str(fp32_onnx), fp32_onnx_source_ckpt=onnx_ckpt,
+            n_matched=matched["n_matched"], n_applied=len(applied), unused_cache_tensors=len(matched["unused_cache_tensors"]),
+            convs="all" if all_applied else [trt_scales.short_name(n) for n in applied],
+            scales={trt_scales.short_name(name): dict(tensor=info["tensor"], trt_scale=info["scale"],
+                                                      calib_scale=before[name], applied=name in applied_set)
+                    for name, info in matched["scales"].items()})
+        print(f"[trt] 활성화 scale {len(applied)}/{matched['n_matched']}개를 캐시 값으로 바꿈 "
+              f"({matched['cache'].get('calib_type', '?')} {matched['cache'].get('calib_images', '?')}장, {calib_path})")
+
     def train(self):
-        """[4] 가짜 양자화 켠 채 학습. val 이 제일 좋았던 가중치를 마지막에 되돌려 놓음"""
+        """[4] 가짜 양자화 켠 채 학습. 후보 = 학습 전(0 iter) 모델 + eval 때마다의 가중치.
+        장애물→바닥% 가 학습 전 모델(ptq_sim)보다 늘지 않은 후보 중 mIoU 최고를 마지막에 되돌려 놓음"""
         args, model = self.args, self.model
         params = [p for p in model.parameters() if p.requires_grad]
         optimizer = torch.optim.AdamW(params, lr=args.lr, weight_decay=args.weight_decay)
         scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda it: (1 - it / max(args.iters, 1)) ** 0.9)   # PolyLR
 
-        best_miou = self.results.get("ptq_sim", {}).get("miou", -1)
+        baseline = self.results.get("ptq_sim")   # 학습 전 INT8 모델 = 후보 0 이자 장→바 기준
+        best_miou = baseline["miou"] if baseline else -1
         best_state = copy.deepcopy(model.state_dict())
+        self.selection = dict(
+            rule="장애물→바닥% 가 학습 전 모델(ptq_sim) + obs_floor_tol_pp 이하인 후보 중 mIoU 최고 (동률이면 먼저 나온 것)",
+            obs_floor_tol_pp=args.obs_floor_tol,
+            baseline_obstacle_to_floor_pct=baseline["obstacle_to_floor_pct"] if baseline else None,
+            chosen_iter=0, candidates=[])
+        if baseline:
+            self.selection["candidates"].append(dict(iter=0, miou=baseline["miou"], eligible=True, chosen=True,
+                                                     obstacle_to_floor_pct=baseline["obstacle_to_floor_pct"]))
         iteration = 0
         started = time.time()
         model.train()
@@ -266,16 +328,31 @@ class QatTrainer:
                     print(f"  iter {iteration}/{args.iters} loss {loss.item():.4f} lr {scheduler.get_last_lr()[0]:.2e} ({time.time() - started:.0f}s)")
                 if self.val_loader and (iteration % args.eval_every == 0 or iteration == args.iters):
                     result = evaluate(model, self.val_loader, self.spec.num_classes, self.device)
-                    print(f"  [val] iter {iteration}: {fmt(result)}")
-                    if result["miou"] > best_miou:
+                    o2f = result["obstacle_to_floor_pct"]
+                    limit = self.selection["baseline_obstacle_to_floor_pct"] + args.obs_floor_tol
+                    eligible = o2f <= limit
+                    chosen = eligible and result["miou"] > best_miou
+                    if chosen:
                         best_miou, best_state = result["miou"], copy.deepcopy(model.state_dict())
+                        for candidate in self.selection["candidates"]:
+                            candidate["chosen"] = False
+                        self.selection["chosen_iter"] = iteration
+                    self.selection["candidates"].append(dict(iter=iteration, miou=result["miou"], eligible=eligible,
+                                                             chosen=chosen, obstacle_to_floor_pct=o2f))
+                    why = ("채택" if chosen else
+                           f"장→바 {o2f:.3f}% > 기준 {limit:.3f}% → 제외" if not eligible else f"mIoU ≤ 지금 최고 {best_miou:.4f}")
+                    print(f"  [val] iter {iteration}: {fmt(result)}  → {why}")
                     model.train()
                 if iteration >= args.iters:
                     break
 
         if self.val_loader:
             model.load_state_dict(best_state)
-            self._eval("qat", "[4] QAT 최고       ")
+            chosen_iter = self.selection["chosen_iter"]
+            n_rejected = sum(1 for candidate in self.selection["candidates"] if not candidate["eligible"])
+            print(f"[4] 선택: iter {chosen_iter} ({'학습 전 모델' if chosen_iter == 0 else '학습된 가중치'}), "
+                  f"후보 {len(self.selection['candidates'])}개 중 장→바 기준 초과로 제외 {n_rejected}개")
+            self._eval("qat", "[4] 선택된 모델      ")
 
     def export(self):
         """[5] Q/DQ ONNX 내보내기 + onnxruntime 비교 + json 저장"""
@@ -331,7 +408,8 @@ class QatTrainer:
                   qat=dict(iters=args.iters, lr=args.lr, batch=args.batch, calib_batches=args.calib_batches,
                            calib_method=args.calib_method,
                            calib_augmentation=not args.calib_no_aug, seed=args.seed, workers=args.workers,
-                           conv_quantized=self.n_quant, bn_fused=self.n_fused, results=self.results),
+                           conv_quantized=self.n_quant, bn_fused=self.n_fused, act_calib=self.act_calib,
+                           selection=self.selection, results=self.results),
                   torch_version=torch.__version__, exported_at=time.strftime("%Y-%m-%d %H:%M:%S"))
         (args.out.parent / "qat_results.json").write_text(json.dumps(self.results, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"[done] {args.out} (+ .json)  → Jetson: python -m deploy.build_engine --onnx {args.out} --precision qat")
@@ -361,6 +439,13 @@ def parse_args():
                         help="활성화 scale 집계: ema=기존 지수이동평균, max=전체 관측 최대 절댓값")
     parser.add_argument("--calib-no-aug", action="store_true",
                         help="캘리브레이션 증강만 끔. QAT 학습 증강과 샘플링 설정은 유지")
+    parser.add_argument("--trt-calib", type=Path, default=None,
+                        help="TensorRT PTQ 캘리브레이션 캐시 (예: models/fast_scnn_int8_entropy.calib). 주면 활성화 scale 을 이 값으로 바꿈")
+    parser.add_argument("--trt-fp32-onnx", type=Path, default=None, help="그 캐시를 만든 FP32 ONNX (기본: 캐시 이름에서 유추 <stem>.onnx)")
+    parser.add_argument("--trt-scale-convs", nargs="*", default=["all"],
+                        help="캐시 scale 을 넣을 conv: all 또는 접두사(LTD, LTD.dsconv1 …). 나머지는 EMA/max scale 유지")
+    parser.add_argument("--obs-floor-tol", type=float, default=0.0,
+                        help="[4] 선택: 장애물→바닥%% 가 학습 전 모델 + 이 값(%%p) 이하인 후보만 봄. inf 면 예전처럼 mIoU 만 봄")
     parser.add_argument("--eval-every", type=int, default=50)
     parser.add_argument("--workers", type=int, default=2, help="Windows 면 0 권장")
     parser.add_argument("--seed", type=int, default=42)

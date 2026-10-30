@@ -140,7 +140,7 @@ def quantize_convs(model: nn.Module, skip: tuple[str, ...] = (), *, calib_method
         for child_name, child in list(parent.named_children()):
             full_name = f"{parent_name}.{child_name}" if parent_name else child_name
             if isinstance(child, nn.Conv2d) and not any(full_name.startswith(prefix) for prefix in skip):
-                setattr(parent, child_name, QuantConv2d(child, calib_method=calib_method))
+                setattr(parent, child_name, QuantConv2d(child, calib_method=calib_method).to(child.weight.device))   # 모델이 GPU 면 scale 버퍼도 GPU 에
                 replaced += 1
     return replaced
 
