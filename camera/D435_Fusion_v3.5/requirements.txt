@@ -1,0 +1,7 @@
+# Windows x64. Tested with Python 3.14.7; NumPy requires Python >=3.12.
+# Run with the SAME interpreter selected in VS Code:
+# python -m pip install -r requirements.txt
+numpy==2.5.3
+opencv-python==5.0.0.93
+pyrealsense2==2.59.1.11053
+torch==2.14.1
