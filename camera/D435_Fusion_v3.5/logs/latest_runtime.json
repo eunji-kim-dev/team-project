@@ -1,30 +1,30 @@
 {
-  "elapsed_s": 6.733140299999832,
+  "elapsed_s": 75.34258399999999,
   "acquisition": {
-    "fps": 14.004821019588476,
-    "capture_age_ms": 328.30009999997856,
-    "capture_completion_age_ms": 320.8351999992374,
-    "align_ms": 7.541699999819684,
-    "max_align_ms": 9.3708999993396,
-    "max_capture_gap_ms": 82.21729999968375,
+    "fps": 13.962678609978308,
+    "capture_age_ms": 342.27649999957066,
+    "capture_completion_age_ms": 337.6198999994813,
+    "align_ms": 4.689499999585678,
+    "max_align_ms": 16.692700000930927,
+    "max_capture_gap_ms": 81.73019999958342,
     "sdk_timeouts": 0,
     "incomplete_frames": 0,
     "errors": 0,
     "error": "",
     "last_error": "",
-    "received_frames": 77,
+    "received_frames": 1080,
     "events": [],
     "sdk_phase": "SDK poll_for_frames",
-    "sdk_phase_ms": 315.15009999930044,
+    "sdk_phase_ms": 317.93440000001283,
     "backend": "poll_for_frames",
     "cleanup_pending": true
   },
   "processing": {
     "busy_ms": 0.0,
-    "max_processing_ms": 373.2505999996647,
+    "max_processing_ms": 401.8796999989718,
     "failures": 0,
     "last_error": "",
-    "dropped_pending": 41
+    "dropped_pending": 689
   },
   "device_report": {
     "device": {
@@ -720,33 +720,40 @@
     ]
   },
   "last_result_stats": {
-    "frame_id": "73:73:1793340878949.5544",
+    "frame_id": "1078:1079:1793347409810.368",
     "source_id": "live",
-    "received_at": "2026-10-30T15:14:38.965409+09:00",
-    "completed_monotonic": 4107.2906653,
-    "input_age_ms": 76.78980000036972,
-    "processing_ms": 131.046200000128,
-    "costmap_ms": 71.0625000001528,
+    "received_at": "2026-10-30T17:03:29.821705+09:00",
+    "completed_monotonic": 10638.208393,
+    "input_age_ms": 121.67910000061966,
+    "processing_ms": 189.9613000005047,
+    "costmap_ms": 87.43109999886656,
     "stage_ms": {
-      "semantics": 0.052800000048591755,
-      "geometry_floor": 54.60349999975733,
-      "costmap": 71.0625000001528,
-      "finalize": 5.327400000169291
+      "semantics": 51.68719999892346,
+      "geometry_floor": 45.35350000151084,
+      "costmap": 87.43109999886656,
+      "finalize": 5.489500001203851
     },
-    "latency_ms": 153.46339999996417,
-    "valid_depth_fraction": 0.7962565104166667,
-    "point_count": 244610,
+    "latency_ms": 214.87860000161163,
+    "valid_depth_fraction": 0.799541015625,
+    "point_count": 245619,
     "filtered_removed_pixels": 0,
+    "color_projection_deferred": false,
     "depth_interpolated_pixels": 0,
     "map_updated": true,
     "replay": false,
     "scnn": {
-      "frame_id": "73:73:1793340878949.5544",
-      "status": "TOO MUCH MODEL",
-      "message": "too much model: 2 .pth files found; keep exactly one in C:\\Users\\KCCI\\Documents\\Codex\\D435_Fusion_v3.5\\models",
-      "inference_ms": 0.0,
-      "model_sha256": "",
-      "model_filename": "",
+      "frame_id": "1078:1079:1793347409810.368",
+      "status": "OK",
+      "message": "team_fastscnn_iter1600_seed42.pth | Team FastSCNN | PyTorch CPU",
+      "inference_ms": 51.51549999936833,
+      "model_sha256": "9a276050b8198a468e55277b708b2f1eb2303f5b566b64fa3bb72ac9484df55d",
+      "model_filename": "team_fastscnn_iter1600_seed42.pth",
+      "evidence_kind": "softmax",
+      "backend_info": {
+        "backend": "pytorch",
+        "device": "cpu"
+      },
+      "confidence_available": true,
       "classes": {
         "0": "floor",
         "1": "obstacle",
@@ -754,12 +761,12 @@
       }
     },
     "map_diagnostics": {
-      "floor_support_cells": 1658,
-      "no_floor_support_cells": 12742,
-      "out_of_view_cells": 4,
-      "missing_depth_cells": 1442,
-      "occluded_or_margin_cells": 62,
-      "volume_clear_cells": 150,
+      "floor_support_cells": 1870,
+      "no_floor_support_cells": 12530,
+      "out_of_view_cells": 32,
+      "missing_depth_cells": 1420,
+      "occluded_or_margin_cells": 231,
+      "volume_clear_cells": 187,
       "reason_priority": "outside_view > missing_depth > occluded_or_margin; one reason per rejected supported cell",
       "sample_heights_m": [
         0.05,
@@ -774,25 +781,25 @@
       ],
       "visibility_policy": "valid_center",
       "visibility_min_neighbors": 5,
-      "usable_depth_fraction": 0.7881119791666666,
-      "obstacle_occluded_cells": 623,
+      "usable_depth_fraction": 0.7910026041666667,
+      "obstacle_occluded_cells": 678,
       "status": "OK",
-      "obstacle_conflict_cells": 3,
-      "current_free_evidence_cells": 1032,
+      "obstacle_conflict_cells": 2,
+      "current_free_evidence_cells": 1631,
       "free_space_policy": "observed_floor",
-      "observed_floor_cells": 1658,
-      "semantic_floor_cells": 0,
-      "semantic_conflict_cells": 0,
-      "observed_free_without_full_volume_cells": 882,
-      "mapped_free_cells": 888,
-      "physical_obstacle_cells": 1575,
-      "green_cells": 291,
-      "forbidden_cells": 392,
-      "inflation_cells": 205,
-      "unknown_cells": 11937,
+      "observed_floor_cells": 1870,
+      "semantic_floor_cells": 1072,
+      "semantic_conflict_cells": 30,
+      "observed_free_without_full_volume_cells": 1446,
+      "mapped_free_cells": 1627,
+      "physical_obstacle_cells": 1221,
+      "green_cells": 747,
+      "forbidden_cells": 541,
+      "inflation_cells": 339,
+      "unknown_cells": 11552,
       "mapping_mode": "camera_relative",
       "outside_view_cells": 4213,
-      "in_view_unknown_cells": 7724,
+      "in_view_unknown_cells": 7339,
       "horizontal_fov": {
         "native_depth_hfov_deg": 79.30579090588161,
         "left_edge_deg": -40.1456765260843,
@@ -800,102 +807,156 @@
         "definition": "native depth horizontal FOV; cell-center/corners across robot height; vertical blind spots remain inside unknown"
       },
       "fusion": {
-        "active": false,
-        "reason": "model unavailable or fusion disabled",
-        "mapped_points": 0,
-        "floor_source": "depth plane fallback",
-        "depth_floor_conflict_points": 0,
-        "depth_floor_conflict_cells": 0,
+        "active": true,
+        "reason": "same-frame calibrated semantic-depth fusion",
+        "mapped_points": 80911,
+        "evidence_kind": "softmax",
+        "confidence_thresholds_applied": true,
+        "floor_source": "SCNN floor seeds + depth plane",
+        "depth_floor_conflict_points": 832,
+        "depth_floor_conflict_cells": 144,
         "obstacle_min_height_m": 0.05,
-        "conflict_policy": "measured height >= minimum but high-confidence SCNN floor: UNKNOWN, never free",
-        "semantic_floor_points": 0,
+        "conflict_policy": "measured height >= minimum but accepted SCNN floor evidence: UNKNOWN, never free",
+        "semantic_floor_points": 7804,
         "semantic_low_obstacle_points": 0,
         "semantic_low_obstacle_cells": 0,
-        "conflict_cells": 0
+        "conflict_cells": 30
       },
       "obstacle_support": {
         "enabled": true,
-        "candidate_points": 63134,
-        "accepted_points": 62777,
-        "rejected_points": 357,
+        "candidate_points": 63791,
+        "accepted_points": 63404,
+        "rejected_points": 387,
         "rule": "8-neighbor native-depth support; retain endpoints adjoining strong support; no temporal history",
         "min_neighbors": 2,
         "depth_jump_base_m": 0.025,
         "depth_jump_per_m2": 0.003,
-        "uncertain_cells": 251
+        "uncertain_cells": 352
       },
       "candidate_review": {
         "enabled": true,
-        "components_reviewed": 2,
-        "local_held_points": 0,
-        "temporal_held_points": 9,
+        "components_reviewed": 4,
+        "local_held_points": 61,
+        "temporal_held_points": 13,
         "confirmed_small_components": 0,
         "reviewed_components": [
           {
-            "points": 6,
+            "points": 21,
             "center_xyz_m": [
-              1.7938334147135417,
-              -1.1871483127276103,
-              0.055460920333862296
+              2.000762014161973,
+              1.250127599352882,
+              -0.10368100620451427
             ],
             "height_range_m": [
-              0.05672278502496264,
-              0.09014282808965719
+              0.052498536847641455,
+              0.09892436843007835
             ],
             "local_floor": {
-              "support_points": 1571,
+              "support_points": 384,
               "trusted": true,
-              "inliers": 1342,
-              "rmse_m": 0.006698162448412518,
-              "tilt_deg": 11.9252102756007,
-              "shift_m": 0.0029432777381443644
+              "inliers": 384,
+              "rmse_m": 0.0033183756381497055,
+              "tilt_deg": 5.446984785277445,
+              "shift_m": 0.021141600276306294
             },
             "local_height_range_m": [
-              0.0600951177503455,
-              0.0921488109855096
+              0.03178910484791833,
+              0.07777363612024762
+            ]
+          },
+          {
+            "points": 38,
+            "center_xyz_m": [
+              1.684210623565473,
+              1.18871597867263,
+              -0.11024765918129359
+            ],
+            "height_range_m": [
+              0.050001493115489085,
+              0.05610819807280068
+            ],
+            "local_floor": {
+              "support_points": 946,
+              "trusted": true,
+              "inliers": 853,
+              "rmse_m": 0.004277977601063181,
+              "tilt_deg": 4.227006808086125,
+              "shift_m": 0.018150271837783533
+            },
+            "local_height_range_m": [
+              0.03151676607195625,
+              0.037873501831621775
             ]
           },
           {
             "points": 3,
             "center_xyz_m": [
-              1.3226667245229085,
-              0.7140935063362122,
-              -0.024972388744354257
+              1.6163334051767986,
+              1.1675788561503093,
+              -0.10672633806864422
             ],
             "height_range_m": [
-              0.05880483364525374,
-              0.072679650220582
+              0.05162523992566308,
+              0.0540565379477226
             ],
             "local_floor": {
-              "support_points": 2687,
-              "trusted": false,
-              "inliers": 1886,
-              "rmse_m": 0.004009737661956678,
-              "tilt_deg": 2.713602555372054,
-              "shift_m": 0.0024411324535393575
-            }
+              "support_points": 923,
+              "trusted": true,
+              "inliers": 850,
+              "rmse_m": 0.00409397213546665,
+              "tilt_deg": 4.656271434506818,
+              "shift_m": 0.018038689965660326
+            },
+            "local_height_range_m": [
+              0.03357920209780732,
+              0.036027589617343814
+            ]
+          },
+          {
+            "points": 12,
+            "center_xyz_m": [
+              1.3730833927790325,
+              1.042306939760844,
+              -0.0784542755285899
+            ],
+            "height_range_m": [
+              0.050871903986931415,
+              0.08774952570181906
+            ],
+            "local_floor": {
+              "support_points": 897,
+              "trusted": true,
+              "inliers": 721,
+              "rmse_m": 0.0025009623873563664,
+              "tilt_deg": 4.498079366494352,
+              "shift_m": 0.020994154566071177
+            },
+            "local_height_range_m": [
+              0.029934364264702196,
+              0.06662097519734347
+            ]
           }
         ],
         "motion": {
           "stable": true,
           "reason": "stable",
-          "depth_changed_fraction": 0.36815114709851554,
+          "depth_changed_fraction": 0.37321380425990835,
           "depth_signed_shift_m": 0.0,
-          "tracks": 201,
-          "flow_px": 0.007072971202433109,
-          "rotation_deg": 0.0006409729058837947,
-          "scale_delta": 5.9288946098190465e-06,
+          "tracks": 216,
+          "flow_px": 0.018284521996974945,
+          "rotation_deg": 0.00034586412919644855,
+          "scale_delta": 2.9477545169465103e-05,
           "inlier_ratio": 1.0,
           "background_tiles": 16
         },
         "confirmation_streaks": [
           1,
-          1
+          2
         ],
-        "local_checks": 2,
-        "elapsed_ms": 16.21789999990142
+        "local_checks": 4,
+        "elapsed_ms": 21.079700001791934
       },
-      "rear_policy_unknown_cells": 3141,
+      "rear_policy_unknown_cells": 2947,
       "robot": {
         "radius_m": 0.2,
         "safety_margin_m": 0.05,
@@ -906,23 +967,41 @@
         "inflation_extra_m": 0.15,
         "cost_direction": "camera_visible"
       },
-      "semantic_free_added_cells": 0,
-      "semantic_free_continuity_cells": 0,
+      "semantic_free_added_cells": 445,
+      "semantic_free_continuity_cells": 84,
       "semantic_free": {
         "enabled": true,
-        "candidate_cells": 0,
-        "continuity_candidates": 0,
-        "continuity_added_cells": 0,
-        "reason": "disabled or unavailable",
-        "definition": "SCNN+plane inferred ground, not measured depth or full robot-height clearance"
+        "candidate_cells": 697,
+        "continuity_candidates": 980,
+        "continuity_added_cells": 100,
+        "reason": "same-frame SCNN + validated plane + obstacle/uncertain veto",
+        "definition": "SCNN+plane inferred ground, not measured depth or full robot-height clearance",
+        "evidence_kind": "softmax",
+        "confidence_thresholds_applied": true,
+        "continuity_max_distance_m": 0.15,
+        "continuity_confidence": 0.75,
+        "occluded_candidates": 45,
+        "eligible_cells": 752
       },
-      "measured_free_cells": 888,
-      "risk_forbidden_cells": 856,
-      "risk_inflation_cells": 660,
-      "unknown_with_risk_cells": 919
+      "measured_free_cells": 1182,
+      "risk_forbidden_cells": 1098,
+      "risk_inflation_cells": 676,
+      "unknown_with_risk_cells": 894
     }
   },
   "exit_reason": "normal",
   "recovery_events": [],
-  "runtime_architecture": "v3.5 direct"
+  "runtime_architecture": "v3.5 direct",
+  "performance_settings": {
+    "profile": "auto",
+    "math_threads": 1,
+    "opencv_threads": 1,
+    "ui_fps": 15,
+    "render_max_width": 1280,
+    "render_max_height": 800,
+    "cloud_display_max_points": 8000
+  },
+  "last_render_ms": 2.4111000002449146,
+  "render_max_size": null,
+  "ui_target_fps": 60
 }

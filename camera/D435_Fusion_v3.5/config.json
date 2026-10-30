@@ -170,5 +170,14 @@
     "fps": 15,
     "max_width": 1920,
     "max_height": 1080
+  },
+  "performance": {
+    "profile": "auto",
+    "math_threads": 1,
+    "opencv_threads": 1,
+    "ui_fps": 15,
+    "render_max_width": 1280,
+    "render_max_height": 800,
+    "cloud_display_max_points": 8000
   }
 }

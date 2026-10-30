@@ -1,5 +1,6 @@
 """카메라/GUI와 분리한 계산 모듈. 한 입력 프레임에 대응하는 스냅샷을 반환한다."""
-from dataclasses import dataclass
+from dataclasses import dataclass,field
+import threading
 import time
 import json
 import copy
@@ -54,6 +55,28 @@ class Snapshot:
     applied_config: object = None
     semantic_free: object = None
     semantic_free_continuity: object = None
+    _color_lock: object = field(default_factory=threading.Lock,repr=False,compare=False)
+
+    def ensure_color(self):
+        # [Jetson 경량화] 모델 없는 무지개 화면에는 RGB 투영/정렬이 불필요하다.
+        # 컬러 화면 또는 S 저장에서 같은 원본 프레임으로 한 번 계산하여 재사용한다.
+        with self._color_lock:
+            if self.rgb is None:
+                cal=self.packet.calibration;c=self.packet.capture
+                optical=(rays(cal["depth_intrinsics"])*self.filtered_depth[:,:,None]).reshape(-1,3)[self.source_indices]
+                rgb,uv,ok,z=colorize(optical,c.color,cal)
+                self.color_classes=project_classes(self.point_classes,uv,ok,z,c.color.shape[:2])
+                self.color_valid=ok;self.rgb=rgb
+
+
+def project_classes(classes,uv,color_ok,color_z,shape):
+    out=np.full(shape,255,np.uint8)
+    ids=np.flatnonzero(color_ok)
+    if len(ids):
+        u,v=np.rint(uv[ids]).astype(np.int32).T
+        order=np.argsort(color_z[ids])[::-1]
+        out[v[order],u[order]]=classes[ids[order]]
+    return out
 
 class Processor:
     def __init__(self, config):
@@ -111,10 +134,16 @@ class Processor:
         indices=np.flatnonzero(keep)
         optical=(rays(cal["depth_intrinsics"])*filtered[:,:,None]).reshape(-1,3)[indices]
         points=optical@self.T[:3,:3].T+self.T[:3,3]
-        rgb,uv,color_ok,color_z=colorize(optical,c.color,cal)
+        rgb=uv=color_ok=color_z=None
+        if semantic.status=="OK" and self.cfg["fusion"]["enabled"]:
+            rgb,uv,color_ok,color_z=colorize(optical,c.color,cal)
         # [v3.5 추가] RGB 예측을 native 점의 Color 투영 좌표로 가져온다. 동일 frame ID를 필수 확인.
-        point_labels,point_confidence,fusion_info=sample_semantics(
-            semantic,frame_id,c.color.shape[:2],uv,color_ok,self.cfg["fusion"])
+        if uv is not None:
+            point_labels,point_confidence,fusion_info=sample_semantics(
+                semantic,frame_id,c.color.shape[:2],uv,color_ok,self.cfg["fusion"])
+        else:
+            point_labels=np.full(len(points),255,np.uint8);point_confidence=np.zeros(len(points),np.float32)
+            fusion_info={"active":False,"reason":"model unavailable or fusion disabled","mapped_points":0}
         floor,floor_source=fit_fused_floor(points,point_labels,point_confidence,
                                          self.cfg["floor"],self.cfg["fusion"],fusion_info["active"])
         fusion_info["floor_source"]=floor_source
@@ -166,7 +195,7 @@ class Processor:
             fusion_info.update(depth_floor_conflict_points=int(semantic_held.sum()),
                 depth_floor_conflict_cells=int(held_cells.sum()),
                 obstacle_min_height_m=g["obstacle_min_height_m"],
-                conflict_policy="measured height >= minimum but high-confidence SCNN floor: UNKNOWN, never free")
+                conflict_policy="measured height >= minimum but accepted SCNN floor evidence: UNKNOWN, never free")
             # [v3.5] 전역 5cm 기준/기존 SCNN 충돌 판정 이후 약한 작은 후보만 재검사.
             signature=json.dumps({k:cal[k] for k in ("depth_intrinsics","color_intrinsics","depth_to_color","depth_scale_m")},sort_keys=True)
             obstacle,local_held,temporal_held,review_info=self.reviewer.process(
@@ -259,14 +288,7 @@ class Processor:
             risk_forbidden_cells=int(((risk==253)&in_view).sum()),
             risk_inflation_cells=int(((risk>0)&(risk<253)&in_view).sum()),
             unknown_with_risk_cells=int(((self.grid.physical==-1)&(risk>0)&in_view).sum()))
-        h,w=c.color.shape[:2]
-        color_classes=np.full((h,w),255,np.uint8)
-        if len(points):
-            ids=np.flatnonzero(color_ok)
-            u,v=np.rint(uv[ids]).astype(np.int32).T
-            order=np.argsort(color_z[ids])[::-1]
-            # [v3.5 추가] 표시 격자는 Color 픽셀. 더 가까운 점을 마지막에 써 가려짐을 처리한다.
-            color_classes[v[order],u[order]]=classes[ids[order]]
+        color_classes=None if uv is None else project_classes(classes,uv,color_ok,color_z,c.color.shape[:2])
         self.processed+=1
         done=time.monotonic()
         stats={"frame_id":frame_id,
@@ -279,6 +301,7 @@ class Processor:
                "latency_ms":None if packet.replay else max(0,(done-c.received_monotonic)*1000),
                "valid_depth_fraction":float(valid.mean()),"point_count":len(points),
                "filtered_removed_pixels":int(valid.sum()-keep.sum()),
+               "color_projection_deferred":rgb is None,
                "depth_interpolated_pixels":0,"map_updated":floor.ok,
                "replay":packet.replay,"scnn":semantic.record(),"map_diagnostics":diagnostics}
         return Snapshot(packet,points.astype(np.float32),rgb,color_ok,classes,indices,filtered,valid,

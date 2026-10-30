@@ -1,5 +1,6 @@
 """OpenCV 단일 대시보드. 3D는 점을 가상 카메라에 투영하여 CPU로 렌더링한다."""
 import time
+from functools import lru_cache
 import numpy as np
 import cv2
 from .geometry import voxel_indices
@@ -15,6 +16,16 @@ ROBOT_HEIGHT_LABEL = "Robot Height (m)"
 PALETTE_BGR=np.array([[0,255,0],[0,0,255],[255,0,0]],np.uint8)
 LABEL_LUT_BGR=np.full((256,3),70,np.uint8)
 LABEL_LUT_BGR[:3]=PALETTE_BGR
+COST_LUT_BGR=np.full((256,3),80,np.uint8)
+COST_LUT_BGR[0]=(0,255,0)
+COST_LUT_BGR[1:253]=np.stack((np.zeros(252),255-np.arange(1,253)*.22,np.full(252,255)),axis=1).astype(np.uint8)
+COST_LUT_BGR[253:255]=((255,0,200),(0,0,255))
+
+@lru_cache(maxsize=8)
+def hatch_pattern(shape):
+    # [Jetson 경량화] 같은 화면 크기의 좌표 격자를 매번 만들지 않는다.
+    yy,xx=np.ogrid[:shape[0],:shape[1]]
+    return (xx+yy)%9==0
 
 def text(image,line,xy,size=.48,color=(235,235,235)):
     cv2.putText(image,str(line),xy,cv2.FONT_HERSHEY_SIMPLEX,size,color,1,cv2.LINE_AA)
@@ -28,16 +39,10 @@ def classification_color(ids):
     return result
 
 def cost_color(cost,in_view=None,unknown=None):
-    image=np.full((*cost.shape,3),(80,80,80),np.uint8)
-    image[cost==0]=(0,255,0)  # [v3.5 추가] 관측 자유 공간을 선명한 녹색으로 표시
-    shell=(cost>0)&(cost<253)
-    image[shell]=np.stack((np.zeros(shell.sum()),255-cost[shell]*.22,np.full(shell.sum(),255)),axis=1).astype(np.uint8)
-    image[cost==253]=(255,0,200)
-    image[cost==254]=(0,0,255)
+    image=COST_LUT_BGR[cost]  # [Jetson 경량화] 동일한 색을 미리 계산한 256색 표로 조회.
     # [v3.5] 위험 색을 유지하면서 미관측 부분만 가는 사선으로 구별한다.
     if unknown is not None:
-        yy,xx=np.indices(cost.shape)
-        hatch=np.asarray(unknown,dtype=bool)&(cost>0)&(cost<255)&((xx+yy)%9==0)
+        hatch=np.asarray(unknown,dtype=bool)&(cost>0)&(cost<255)&hatch_pattern(cost.shape)
         image[hatch]=((image[hatch].astype(np.uint16)+np.array([150,150,150]))//2).astype(np.uint8)
     # [v3.5 추가] 시야 밖 검정은 255 미확인 비용과 다른 표시 마스크. 원본 비용 값은 보존.
     if in_view is not None:image[~np.asarray(in_view,dtype=bool)]=(0,0,0)
@@ -187,6 +192,7 @@ class Dashboard:
     def low_angle_cloud(self,s,w,h):
         if self.cloud_mode=="obstacle_low_angle":
             return obstacle_view(s,self.cfg,w,h,self.low_angle_yaw,self.low_angle_pitch,self.low_angle_zoom,prepared=self.prepared_cloud(s))
+        s.ensure_color()
         image=np.full((h,w,3),(28,24,20),np.uint8)
         az,el=np.deg2rad([self.azimuth,self.elevation])
         target=np.array([2.3,0,.4])
@@ -316,9 +322,14 @@ class Dashboard:
         w,h=size or (self.cfg["view"]["width"],self.cfg["view"]["height"])
         w,h=max(1,int(w)),max(1,int(h))
         started=time.perf_counter()
-        if w<1200 or h<800:
-            image=fit_image(self._render(s,rates,status,live_capture,1200,800),w,h)
-        else:image=self._render(s,rates,status,live_capture,w,h)
+        # [Jetson 경량화] 창 크기는 유지하고 내부 렌더 캔버스만 제한. 마지막 등비 확대 1회.
+        limit=self.cfg["view"].get("render_max_size")
+        rw,rh=w,h
+        if limit:
+            scale=min(1.,limit[0]/w,limit[1]/h);rw,rh=int(w*scale),int(h*scale)
+        if rw<1200 or rh<800:rw,rh=1200,800
+        image=self._render(s,rates,status,live_capture,rw,rh)
+        if (rw,rh)!=(w,h):image=fit_image(image,w,h)
         for name in ("robot","height"):
             base=getattr(self,f"_{name}_field_base",None)
             rect=None

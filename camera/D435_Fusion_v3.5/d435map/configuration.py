@@ -4,6 +4,7 @@ import json
 import math
 from pathlib import Path
 from .robot import derive_robot
+from .performance import DEFAULTS,apply_profile
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -12,6 +13,9 @@ def load_config(path=None):
     # [v3.5 추가] 이전 config.json도 새 표시/지도 모드 기본값으로 열 수 있게 한다.
     config.setdefault("mapping", {"mode":"camera_relative"})
     config.setdefault("recording", {"fps":15,"max_width":1920,"max_height":1080})
+    config["performance"]=dict(DEFAULTS,**config.get("performance",{}))
+    config["view"].setdefault("render_max_size",None)
+    config["view"].setdefault("ui_fps",60)
     if path and Path(path).resolve() != (ROOT / "config.json").resolve():
         supplied = json.loads(Path(path).read_text(encoding="utf-8-sig"))
         for group, values in supplied.items():
@@ -23,6 +27,7 @@ def load_config(path=None):
             config[group].update(values)
     # [v3.5] 너비에서 수평 비용 거리를 유도. 로봇 키는 grid.obstacle_max_height_m 사용.
     config["robot"]=derive_robot(config["robot"]["width_m"],config["robot"])
+    apply_profile(config)
     validate(config)
     return config
 

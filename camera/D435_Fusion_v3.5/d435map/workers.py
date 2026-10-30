@@ -106,6 +106,8 @@ class LatestWorker:
             self.stop=True; self.condition.notify()
         self.thread.join(timeout=10)
         if self.thread.is_alive(): raise RuntimeError("processing worker did not stop")
+        # [engine 추가] 실행 중 버퍼를 해제하지 않도록 추론 스레드 join 이후에만 정리.
+        self.processor.semantic.close()
 
 class SaveWorker:
     def __init__(self,cfg):

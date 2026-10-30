@@ -27,17 +27,23 @@ def fit_floor(points, cfg):
     if len(candidates)>cfg["max_samples"]:
         candidates=candidates[rng.choice(len(candidates),cfg["max_samples"],replace=False)]
     cos_limit=np.cos(np.deg2rad(cfg["max_tilt_deg"]))
-    best=None; score=0
-    for _ in range(cfg["ransac_iterations"]):
-        a,b,c=candidates[rng.choice(len(candidates),3,replace=False)]
-        n=np.cross(b-a,c-a); norm=np.linalg.norm(n)
-        if norm<1e-8: continue
-        n=n/norm
-        if n[2]<0: n=-n
-        d=-float(n@a)
-        if n[2]<cos_limit or abs(d/n[2])>cfg["max_height_error_m"]: continue
-        inlier=np.abs(candidates@n+d)<cfg["inlier_distance_m"]
-        if int(inlier.sum())>score: best=inlier; score=int(inlier.sum())
+    # [Jetson 경량화] 동일 난수 표본/횟수/판정값을 유지하며 평면 후보 계산을 묶는다.
+    triplets=np.array([rng.choice(len(candidates),3,replace=False) for _ in range(cfg["ransac_iterations"])])
+    a,b,c=candidates[triplets].transpose(1,0,2)
+    normals=np.cross(b-a,c-a);norm=np.linalg.norm(normals,axis=1)
+    normals/=np.maximum(norm[:,None],1e-30)
+    normals[normals[:,2]<0]*=-1
+    offsets=-np.einsum('ij,ij->i',normals,a)
+    allowed=(norm>=1e-8)&(normals[:,2]>=cos_limit)&(np.abs(offsets/np.maximum(normals[:,2],1e-30))<=cfg["max_height_error_m"])
+    best=None;score=0
+    # 고정 16개 묶음으로 큰 설정에서도 메모리를 제한. 같은 점수이면 먼저 나온 후보 유지.
+    selected_ids=np.flatnonzero(allowed)
+    for first in range(0,len(selected_ids),16):
+        ids=selected_ids[first:first+16]
+        distances=np.einsum('ij,kj->ki',candidates,normals[ids])+offsets[ids,None]
+        inliers=np.abs(distances)<cfg["inlier_distance_m"]
+        scores=inliers.sum(axis=1);winner=int(np.argmax(scores))
+        if scores[winner]>score:best=inliers[winner];score=int(scores[winner])
     if best is None or score<cfg["min_points"] or score/len(candidates)<cfg["min_ratio"]:
         return failure("no floor plane satisfying support / pose constraints")
     for _ in range(2):
