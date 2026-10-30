@@ -17,12 +17,15 @@ python -m eval.bench_engines \\
 - 사진 <이름>_color.png, 정답 <이름>_label_RGB.png (색 라벨은 classes.json 팔레트로 번호 변환, 중간색은 가장 가까운 색)
 - 정확도엔 "장애물→바닥%" (정답 장애물 중 바닥으로 찍은 비율 = 코스트맵에서 부딪히는 오류) 와 최악 5장도 같이 냄
 - --target-fps 30 을 주면 카메라 속도로 맞춰 돎 → 전력·온도를 "같은 처리 속도" 조건에서 비교할 때 씀
+- 표의 "반복 변동%" 는 5회 p50 의 (최대−최소)/중간값. 1~2% 안이면 믿을 만 (팀 문서 기준)
+- 모델별 raw_frame_log_<모델>.csv 에 프레임마다 pre/infer/post/total ms 를 남김 (역할 4 의 전체 로그와 합치는 용)
 - 장시간 안정성(스로틀링·지연 증가)은 eval/soak_test.py 로 따로
 - 출력: <out>/bench_table.md (성능표), bench_results.json (전부), masks/<모델>/*.png (--save-masks)
 """
 from __future__ import annotations
 
 import argparse
+import csv
 import gc
 import json
 import platform
@@ -283,7 +286,8 @@ class ModelBenchmark:
             seg.segment(self.frames[0], i)
 
         total_ms, infer_ms, pre_ms, post_ms = [], [], [], []
-        run_p50 = []   # 반복(run)마다의 p50 → 반복 간 편차 확인용
+        run_p50 = []        # 반복(run)마다의 p50 → 반복 간 편차 확인용
+        frame_rows = []     # 프레임별 시간 (raw_frame_log 용)
         masks = []
         frame_period = 1.0 / args.target_fps if args.target_fps > 0 else 0.0   # 카메라 속도 흉내. 0 이면 최대 속도
         for run_index in range(args.runs):
@@ -309,6 +313,10 @@ class ModelBenchmark:
                 infer_ms.append(timing["infer_ms"])
                 pre_ms.append(timing["pre_ms"])
                 post_ms.append(timing["post_ms"])
+                frame_rows.append({"run": run_index + 1, "frame_id": i, "image": self.images[i].name,
+                                   "pre_ms": round(timing["pre_ms"], 3), "infer_ms": round(timing["infer_ms"], 3),
+                                   "post_ms": round(timing["post_ms"], 3), "total_ms": round(elapsed, 3),
+                                   "deadline_miss": int(elapsed > args.budget_ms)})
             run_p50.append(percentile(this_run, 50))
             print(f"  run {run_index + 1}/{args.runs}: {len(self.frames)}장, total p50 {run_p50[-1]} ms")
 
@@ -360,6 +368,14 @@ class ModelBenchmark:
                 cv2.imwrite(str(out_dir / (image_path.stem + ".png")), mask)   # 값 0/1/2 그대로
             result["masks_dir"] = str(out_dir)
 
+        # 프레임별 시간 로그 (팀 문서의 raw_frame_log 중 AI 추론 부분). 역할 4 가 전체 루프 로그와 합칠 수 있음
+        log_path = args.out / f"raw_frame_log_{tag}.csv"
+        with open(log_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=list(frame_rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(frame_rows)
+        result["frame_log"] = str(log_path)
+
         seg.close()
         del seg
         gc.collect()
@@ -371,7 +387,7 @@ class ModelBenchmark:
 def make_table(results: list[dict], class_names: list[str], ref_tag: str, budget_ms: float) -> str:
     ko = [CLASS_KO.get(name, name) for name in class_names]
     header = (["모델", "mIoU"] + [f"IoU {c}" for c in ko] + ["장애물→바닥%"]
-              + ["p50 ms(전체)", "p95 ms(전체)", "p50 ms(추론만)", "FPS", f"{budget_ms:g}ms 초과%",
+              + ["p50 ms(전체)", "p95 ms(전체)", "p50 ms(추론만)", "FPS", f"{budget_ms:g}ms 초과%", "반복 변동%",
                  "파일 MB", "활성화 MB", "RSS 증가 MB", f"{ref_tag} 대비 일치%"]
               + [f"일치% {c}" for c in ko])
 
@@ -390,7 +406,8 @@ def make_table(results: list[dict], class_names: list[str], ref_tag: str, budget
                + [cell(v, 3) for v in acc.get("iou", [None] * len(ko))]
                + [cell(acc.get("obstacle_to_floor_pct"), 2)]
                + [cell(r["total_ms"]["p50"], 2), cell(r["total_ms"]["p95"], 2), cell(r["infer_ms"]["p50"], 2),
-                  cell(r["fps_from_p50"]), cell(r["over_budget_pct"]), cell(r["file_mb"]),
+                  cell(r["fps_from_p50"]), cell(r["over_budget_pct"]), cell(r.get("run_variation_pct")),
+                  cell(r["file_mb"]),
                   cell(r.get("device_memory_mb")), cell(r["rss_delta_mb"]), cell(agree.get("pixel_agree_pct"), 2)]
                + [cell(v, 2) for v in agree.get("class_agree_pct", [None] * len(ko))])
         lines.append("| " + " | ".join(row) + " |")
