@@ -1,4 +1,8 @@
-"""고정 표준 설정 + models 폴더의 단일 PTH로 동일 RGB 프레임을 추론. 오류 시 마스크를 만들지 않는다."""
+"""고정 표준 설정 + models 폴더의 단일 모델 파일(.pth 또는 .engine)로 동일 RGB 프레임을 추론. 오류 시 마스크를 만들지 않는다.
+- .pth    : torch_fastscnn.TorchBackend (PyTorch CPU)
+- .engine : trt_fastscnn.TrtBackend (TensorRT GPU, Jetson). 옆에 deploy 가 만든 <이름>.engine.json 이 있어야 한다.
+두 백엔드 모두 float 로짓 [1,3,H,W] 를 돌려주고, softmax 신뢰도는 여기서 같은 코드로 계산한다.
+"""
 from dataclasses import dataclass
 from pathlib import Path
 import hashlib
@@ -9,6 +13,8 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 STANDARD_SPEC_NAME = "standard_fastscnn.json"
+# [Jetson] 모델 파일로 인정하는 확장자. 폴더에 이 중 정확히 하나만 있어야 한다.
+MODEL_SUFFIXES = (".pth", ".engine")
 
 @dataclass
 class SemanticResult:
@@ -50,13 +56,16 @@ def validate_spec(spec):
         raise ValueError("Output channel class_ids must be a permutation of [0,1,2]")
     return spec
 
-def prepare_input(bgr, spec):
+def prepare_input(bgr, spec, normalize=True):
     inp = spec["input"]
     resized = cv2.resize(bgr, (inp["width"], inp["height"]), interpolation=cv2.INTER_LINEAR)
     if inp["color_order"] == "RGB":
         resized = resized[:, :, ::-1]
     # [v3.5] 정규화 연산 순서는 유지하고 3채널 임시 배열의 반복 할당을 줄인다.
     x = resized.astype(np.float32)
+    if not normalize:
+        # [Jetson] normalize_in_graph 엔진: 0~255 그대로 넘기고 scale/mean/std 는 GPU 그래프가 적용한다.
+        return np.ascontiguousarray(x.transpose(2, 0, 1)[None])
     x *= np.float32(inp["scale"])
     x -= np.asarray(inp["mean"],np.float32)
     x /= np.asarray(inp["std"],np.float32)
@@ -93,34 +102,45 @@ class FastSCNN:
         self.spec = None
         self.model_sha256 = ""
         self.model_filename = ""
+        self.normalize_on_cpu = True
         self.status, self.message = "DISABLED", "SCNN disabled in config"
         if not cfg["enabled"]:
             return
         try:
             directory=Path(cfg["model_dir"]).expanduser()
             if not directory.is_absolute():directory=ROOT/directory
-            # [수정] 시작할 때 바로 아래의 실제 .pth 파일만 센다. 하위 폴더/다른 확장자는 제외.
+            # [수정] 시작할 때 바로 아래의 실제 모델 파일(.pth/.engine)만 센다. 하위 폴더/다른 확장자(.json 등)는 제외.
             if not directory.exists():
                 candidates=[]
             else:
-                candidates=sorted((p for p in directory.iterdir() if p.is_file() and p.suffix.lower()==".pth"),
+                candidates=sorted((p for p in directory.iterdir() if p.is_file() and p.suffix.lower() in MODEL_SUFFIXES),
                                   key=lambda p:p.name.lower())
+            kinds="/".join(MODEL_SUFFIXES)
             if not candidates:
-                self.status,self.message="MODEL MISSING","missing model: keep exactly one compatible .pth file in "+str(directory)
+                self.status,self.message="MODEL MISSING",f"missing model: keep exactly one compatible {kinds} file in "+str(directory)
                 return
             if len(candidates)>1:
-                self.status,self.message="TOO MUCH MODEL",f"too much model: {len(candidates)} .pth files found; keep exactly one in "+str(directory)
+                self.status,self.message="TOO MUCH MODEL",f"too much model: {len(candidates)} model files ({kinds}) found; keep exactly one in "+str(directory)
                 return
             path=candidates[0]
             self.model_filename=path.name
-            # [수정] PTH 이름과 관계없이 같은 표준 JSON을 사용한다.
+            # [수정] 모델 이름과 관계없이 같은 표준 JSON을 사용한다.
             self.spec=validate_spec(json.loads((directory/STANDARD_SPEC_NAME).read_text(encoding="utf-8-sig")))
             # 고정 JSON의 예전 모델 해시와 비교하지 않음. 실제 사용 파일의 해시는 촬영 이력에 기록.
             self.model_sha256=hashlib.sha256(path.read_bytes()).hexdigest()
-            from .torch_fastscnn import TorchBackend
-            self.backend=TorchBackend(path,cfg.get("torch_threads",2))
+            if path.suffix.lower()==".engine":
+                # [Jetson] TensorRT 엔진. 매니페스트 검증(로짓 출력/입력 사양 일치)은 백엔드가 한다.
+                from .trt_fastscnn import TrtBackend
+                self.backend=TrtBackend(path,self.spec)
+                self.normalize_on_cpu=not self.backend.normalize_in_graph
+                label=self.backend.describe()
+            else:
+                from .torch_fastscnn import TorchBackend
+                self.backend=TorchBackend(path,cfg.get("torch_threads",2))
+                self.normalize_on_cpu=True
+                label="PyTorch CPU"
             self.net=self.backend
-            self.status,self.message="READY",path.name+" | Team FastSCNN | PyTorch CPU"
+            self.status,self.message="READY",path.name+" | Team FastSCNN | "+label
         except Exception as exc:
             self.net=None;self.backend=None
             self.status,self.message="MODEL ERROR",str(exc)
@@ -131,7 +151,7 @@ class FastSCNN:
                                   model_sha256=self.model_sha256,model_filename=self.model_filename)
         start = time.monotonic()
         try:
-            tensor=prepare_input(bgr,self.spec)
+            tensor=prepare_input(bgr,self.spec,self.normalize_on_cpu)
             output=self.backend(tensor)
             labels,confidence=decode_prediction(output,self.spec,bgr.shape[:2])
             return SemanticResult(labels, frame_id, "OK", self.message,

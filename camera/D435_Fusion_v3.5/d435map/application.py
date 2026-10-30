@@ -84,7 +84,7 @@ def prepare_output(path=None,project_root=None):
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config",type=Path,help="JSON override; defaults to bundled config.json")
-    parser.add_argument("--models-dir",type=Path,help="Folder with exactly one compatible .pth and standard_fastscnn.json; default: models")
+    parser.add_argument("--models-dir",type=Path,help="Folder with exactly one compatible model (.pth for PyTorch CPU, or .engine + .engine.json for TensorRT) and standard_fastscnn.json; default: models")
     parser.add_argument("--output",type=Path,help="Save root (created if missing); default: captures in the project folder")
     parser.add_argument("--fps",type=int,help="Explicit acquisition FPS, no fallback when set")
     parser.add_argument("--serial",default="")
