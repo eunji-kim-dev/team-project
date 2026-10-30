@@ -115,6 +115,7 @@ def run_live(cfg,args):
                 sensor.rs.align(sensor.rs.stream.color),skew,
                 lambda cap:worker.submit(Packet(cap,calibration,"live",False)))
             acquisition=local_acquisition;opened=time.monotonic()
+            next_render=0.;ui_interval=1./cfg["view"].get("ui_fps",60)
             while True:
                 # [v3.5] 새 5패널에 필요한 최신 RGB/완료 결과만 읽는다.
                 # 예전 2분할/Depth 컬러맵/준비 화면의 이중 렌더링은 만들지 않는다.
@@ -128,8 +129,13 @@ def run_live(cfg,args):
                 status=worker.error or health.get("error","")
                 if saver.busy:status="SAVING"
                 elif saver.status.startswith("SAVE FAILED"):status=saver.status
-                image=show(dashboard.render(displayed,rates,status,live_capture=fresh,
-                                                    size=window_size(WINDOW,cfg)))
+                # [Jetson 경량화] 카메라 15FPS보다 훨씬 자주 전체 화면을 다시 그리지 않는다.
+                # 키 입력/종료 처리는 아래에서 계속 받고, 계산 worker는 독립적으로 최신 프레임 처리.
+                if time.monotonic()>=next_render:
+                    render_started=time.monotonic()
+                    image=show(dashboard.render(displayed,rates,status,live_capture=fresh,
+                                                        size=window_size(WINDOW,cfg)))
+                    next_render=render_started+ui_interval
                 key=cv2.waitKey(15)&255
                 if not window_open():return
                 if recording_key(key,image):continue
@@ -161,7 +167,9 @@ def run_live(cfg,args):
             record={"elapsed_s":time.monotonic()-run_started,
                 "acquisition":acquisition.health() if acquisition else {},"processing":worker.health(),
                 "device_report":report,"last_result_stats":displayed.stats if displayed else None,
-                "exit_reason":exit_reason,"recovery_events":events,"runtime_architecture":"v3.5 direct"}
+                "exit_reason":exit_reason,"recovery_events":events,"runtime_architecture":"v3.5 direct",
+                "performance_settings":cfg.get("performance",{}),"last_render_ms":getattr(dashboard,"last_render_ms",None),
+                "render_max_size":cfg["view"].get("render_max_size"),"ui_target_fps":cfg["view"].get("ui_fps",60)}
             (log_dir/"latest_runtime.json").write_text(json.dumps(record,ensure_ascii=False,indent=2),encoding="utf8")
         except Exception as exc:print("Runtime log write failed:",exc)
         try:worker.close()

@@ -1,4 +1,5 @@
 # Windows x64. Tested with Python 3.14.7; NumPy requires Python >=3.12.
+# Jetson .engine: use requirements-jetson.txt and its installed TensorRT/RealSense environment.
 # Run with the SAME interpreter selected in VS Code:
 # python -m pip install -r requirements.txt
 numpy==2.5.3

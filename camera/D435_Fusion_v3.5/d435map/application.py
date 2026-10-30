@@ -13,6 +13,13 @@ from d435map.display import Dashboard
 from d435map.window import create_window,window_size
 
 def replay(args,cfg):
+    # [engine 추가] 카메라 없는 재생도 조기 Q/예외를 포함해 GPU 메모리를 정리한다.
+    processor=Processor(cfg)
+    try:return _replay(args,cfg,processor)
+    finally:processor.semantic.close()
+
+
+def _replay(args,cfg,processor):
     root=args.replay
     if list(root.glob("*_metadata.json")) or (root/"metadata.json").exists():
         folders=[root]
@@ -20,7 +27,7 @@ def replay(args,cfg):
         folders=sorted({p.parent for p in root.rglob("*_metadata.json")})
     if args.limit: folders=folders[:args.limit]
     if not folders: raise ValueError("No saved v2.2 capture folders found")
-    processor=Processor(cfg); dashboard=Dashboard(cfg); rows=[]
+    dashboard=Dashboard(cfg); rows=[]
     clock_origin=time.monotonic(); first_unix=None; previous_unix=None
     if args.export: args.export.mkdir(parents=True,exist_ok=True)
     replay_window="D435 v3.5 replay"
@@ -84,7 +91,8 @@ def prepare_output(path=None,project_root=None):
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config",type=Path,help="JSON override; defaults to bundled config.json")
-    parser.add_argument("--models-dir",type=Path,help="Folder with exactly one compatible .pth and standard_fastscnn.json; default: models")
+    parser.add_argument("--models-dir",type=Path,help="Folder with exactly one .pth OR .engine and standard_fastscnn.json; default: models")
+    parser.add_argument("--check-model",action="store_true",help="Check model I/O and run one synthetic inference without camera or GUI")
     parser.add_argument("--output",type=Path,help="Save root (created if missing); default: captures in the project folder")
     parser.add_argument("--fps",type=int,help="Explicit acquisition FPS, no fallback when set")
     parser.add_argument("--serial",default="")
@@ -106,9 +114,25 @@ def main():
         cfg["semantics"]["model_dir"]=str(args.models_dir.resolve())
         cfg["semantics"]["enabled"]=True
     validate(cfg)
-    cv2.setNumThreads(2)
+    from .performance import jetson_profile
+    optimized=jetson_profile(cfg["performance"])
+    cv2.setNumThreads(cfg["performance"]["opencv_threads"] if optimized else 2)
+    print("Performance:","jetson" if optimized else "desktop","| full-depth geometry / display-only limits")
     try:
-        if args.replay:
+        if args.check_model:
+            from .semantics import FastSCNN
+            model=FastSCNN(cfg["semantics"])
+            try:
+                print("SCNN:",model.status,"|",model.message)
+                if model.net is None:raise RuntimeError(model.message)
+                inp=model.spec["input"]
+                # 실행 호환성 검사이며 의미 정확도/mIoU 검증이 아니다.
+                result=model.predict(np.full((inp["height"],inp["width"],3),127,np.uint8),"model-check")
+                print(json.dumps(result.record(),ensure_ascii=False,indent=2))
+                if result.status!="OK":raise RuntimeError(result.message)
+                print("Model inference OK. This synthetic input does NOT measure accuracy or live FPS.")
+            finally:model.close()
+        elif args.replay:
             if not args.headless:args.output=prepare_output(args.output)
             rows=replay(args,cfg)
             if any("error" in row for row in rows): raise RuntimeError("Replay had failed captures; inspect report/console")

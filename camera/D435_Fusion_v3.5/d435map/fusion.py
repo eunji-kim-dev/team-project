@@ -4,6 +4,7 @@ SCNN은 깊이 없는 점을 만들지 않는다. 명확한 기하 장애물은 
 import numpy as np
 import cv2
 from .floor import fit_floor
+from .semantics import fusion_scores
 
 def sample_semantics(semantic,frame_id,shape,uv,color_ok,cfg):
     count=len(uv)
@@ -13,9 +14,12 @@ def sample_semantics(semantic,frame_id,shape,uv,color_ok,cfg):
         return labels,confidence,info
     if semantic.frame_id!=frame_id:
         info["reason"]="semantic frame mismatch";return labels,confidence,info
-    mask=semantic.labels;score=getattr(semantic,"confidence",None)
+    mask=semantic.labels
     if not isinstance(mask,np.ndarray) or mask.shape!=shape or mask.dtype!=np.uint8 or not np.isin(mask,[0,1,2]).all():
         info["reason"]="invalid semantic labels";return labels,confidence,info
+    score=fusion_scores(semantic)
+    info["evidence_kind"]=semantic.evidence_kind
+    info["confidence_thresholds_applied"]=semantic.evidence_kind=="softmax"
     if not isinstance(score,np.ndarray) or score.shape!=shape or not np.isfinite(score).all() or np.any((score<0)|(score>1)):
         info["reason"]="valid softmax confidence unavailable";return labels,confidence,info
     # [v3.5 추가] z-buffer에서 보이는 Color 대응만 사용. 경계 1픽셀은 클래스 혼합을 피하도록 제외.
