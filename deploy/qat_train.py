@@ -18,6 +18,8 @@ python -m deploy.qat_train --ckpt checkpoints/best_mIoU_iter_1600.pth --data-roo
       → 학습 결과가 기준보다 나쁘면 억지로 학습된 가중치를 쓰지 않고 학습 전 모델이 그대로 나감
   [5] Q/DQ ONNX 로 내보내고 onnxruntime 과 비교 → models/fast_scnn_qat.onnx (+ .json)
   → Jetson: python -m deploy.build_engine --onnx models/fast_scnn_qat.onnx --precision qat
+# 잔차·fusion Add 입력에도 Q/DQ (기본). 끄면 Add 앞 conv 가 FP16 + 변환 커널로 PTQ 보다 느려짐: --no-quant-adds
+# 로짓 출력(argmax 없음) ONNX 도 함께: --also-logits  → <out stem>_logits.onnx (카메라 앱 softmax 신뢰도용)
 
 데이터 형식 (역할 1 mmseg 설정과 같음)
   <data_root>/images/<이름>_color.png, labels_RGB/<이름>_label_RGB.png, splits/train.txt, val.txt
@@ -203,6 +205,8 @@ class QatTrainer:
         self.results: dict[str, dict] = {}
         self.n_fused = 0       # 접은 BN 개수
         self.n_quant = 0       # QuantConv2d 개수
+        self.n_res_adds = 0    # skip 경로를 양자화한 잔차 블록 수 (quant.quantize_residual_adds)
+        self.n_fusion_adds = 0 # Add 입력에 독립 양자화기를 둔 fusion 모듈 수 (quant.quantize_fusion_add)
         self.act_calib: dict = {}   # 활성화 scale 을 어떻게 정했나 (EMA/max 배치 수, TensorRT 캐시 출처·scale)
         self.selection: dict = {}   # [4] 후보별 mIoU·장→바 와 선택 결과
         self.model: nn.Module | None = None
@@ -246,6 +250,12 @@ class QatTrainer:
         self._eval("fp32_fused", f"[2] BN 접음 {self.n_fused}개 ")
 
         self.n_quant = quant.quantize_convs(self.model, calib_method=self.args.calib_method)
+        if not getattr(self.args, "no_quant_adds", True):   # 옛 args(qat_sensitivity 등)에는 없음 → 끔
+            # [3b] Add 입력 Q/DQ (TensorRT 잔차 블록 권장 배치): 잔차 블록은 conv.0 입력 양자화기를 skip 경로와 공유,
+            #      fusion 은 conv_lower_res 출력에 독립 양자화기. 없으면 Add 앞 conv 가 FP16 출력 + 변환 커널 → QAT 엔진이 PTQ 보다 느림
+            self.n_res_adds = quant.quantize_residual_adds(self.model)
+            self.n_fusion_adds = quant.quantize_fusion_add(self.model, calib_method=self.args.calib_method)
+            print(f"[3] Add 양자화: 잔차 블록 {self.n_res_adds}개 (skip 경로가 conv.0 Q/DQ 공유), fusion Add {self.n_fusion_adds}개")
         calib_loader = make_calibration_loader(self.train_loader, self.args.calib_no_aug)
         n_calib_batches = min(self.args.calib_batches, len(calib_loader))
         print(f"[calib] method={self.args.calib_method}, augmentation={'off' if self.args.calib_no_aug else 'on'}, "
@@ -277,7 +287,8 @@ class QatTrainer:
             print(f"[trt] 주의: FP32 ONNX 의 체크포인트 {onnx_ckpt} ≠ --ckpt {args.ckpt} → scale 이 다른 가중치 기준일 수 있음")
 
         applied_set = set(applied)
-        all_applied = len(applied) == len(matched["scales"])
+        n_total = matched["n_matched"] + matched.get("n_extra", 0)   # conv 입력 45 + 독립 양자화기(Add 입력)
+        all_applied = len(applied) == n_total
         self.act_calib["method"] = (f"trt_{matched['cache'].get('calib_type', 'cache')}" if all_applied
                                     else f"{self.act_calib['method']}+trt({len(applied)})")
         self.act_calib["trt"] = dict(
@@ -285,9 +296,9 @@ class QatTrainer:
             n_matched=matched["n_matched"], n_applied=len(applied), unused_cache_tensors=len(matched["unused_cache_tensors"]),
             convs="all" if all_applied else [trt_scales.short_name(n) for n in applied],
             scales={trt_scales.short_name(name): dict(tensor=info["tensor"], trt_scale=info["scale"],
-                                                      calib_scale=before[name], applied=name in applied_set)
-                    for name, info in matched["scales"].items()})
-        print(f"[trt] 활성화 scale {len(applied)}/{matched['n_matched']}개를 캐시 값으로 바꿈 "
+                                                      calib_scale=before.get(name), applied=name in applied_set)
+                    for name, info in list(matched["scales"].items()) + list(matched.get("extra_scales", {}).items())})
+        print(f"[trt] 활성화 scale {len(applied)}/{n_total}개를 캐시 값으로 바꿈 (conv 입력 {matched['n_matched']} + Add 입력 {matched.get('n_extra', 0)}) "
               f"({matched['cache'].get('calib_type', '?')} {matched['cache'].get('calib_images', '?')}장, {calib_path})")
 
     def train(self):
@@ -354,9 +365,27 @@ class QatTrainer:
                   f"후보 {len(self.selection['candidates'])}개 중 장→바 기준 초과로 제외 {n_rejected}개")
             self._eval("qat", "[4] 선택된 모델      ")
 
-    def export(self):
-        """[5] Q/DQ ONNX 내보내기 + onnxruntime 비교 + json 저장"""
+    def _export_graph(self, model, path: Path) -> int:
+        """ONNX 내보내기 + onnxsim 정리(가중치 Q/DQ 가 접히면 원본 유지) + Q/DQ 존재 확인. 가중치 Q/DQ 수 반환"""
         import onnx
+        export(model, self.spec, path, self.args.opset)
+
+        def count_weight_q(p) -> int:   # per-channel Q 노드 수 = 가중치 Q/DQ 수
+            nodes = onnx.load(str(p)).graph.node
+            return sum(1 for n in nodes if n.op_type == "QuantizeLinear" and any(a.name == "axis" for a in n.attribute))
+
+        n_weight_q = count_weight_q(path)
+        raw_bytes = path.read_bytes()
+        simplify_and_check(path)
+        if count_weight_q(path) != n_weight_q:   # onnxsim 이 가중치 Q/DQ 를 상수로 접었으면 원본으로 되돌림
+            print("[5] onnxsim 이 Q/DQ 를 바꿔서 단순화 전 그래프를 씀")
+            path.write_bytes(raw_bytes)
+        op_types = {n.op_type for n in onnx.load(str(path)).graph.node}
+        assert "QuantizeLinear" in op_types and "DequantizeLinear" in op_types, "Q/DQ 노드가 없음 — export 실패"
+        return n_weight_q
+
+    def export(self):
+        """[5] Q/DQ ONNX 내보내기 + onnxruntime 비교 + json 저장 (--also-logits 면 로짓 출력 ONNX 도)"""
         import onnxruntime as ort
         args, spec = self.args, self.spec
 
@@ -369,20 +398,7 @@ class QatTrainer:
             print(f"[5] AdaptiveAvgPool2d 교체 {len(replaced)}개")
 
         args.out.parent.mkdir(parents=True, exist_ok=True)
-        export(model, spec, args.out, args.opset)
-
-        def count_weight_q(path) -> int:   # per-channel Q 노드 수 = 가중치 Q/DQ 수
-            nodes = onnx.load(str(path)).graph.node
-            return sum(1 for n in nodes if n.op_type == "QuantizeLinear" and any(a.name == "axis" for a in n.attribute))
-
-        n_weight_q = count_weight_q(args.out)
-        raw_bytes = args.out.read_bytes()
-        simplify_and_check(args.out)
-        if count_weight_q(args.out) != n_weight_q:   # onnxsim 이 가중치 Q/DQ 를 상수로 접었으면 원본으로 되돌림
-            print("[5] onnxsim 이 Q/DQ 를 바꿔서 단순화 전 그래프를 씀")
-            args.out.write_bytes(raw_bytes)
-        op_types = {n.op_type for n in onnx.load(str(args.out)).graph.node}
-        assert "QuantizeLinear" in op_types and "DequantizeLinear" in op_types, "Q/DQ 노드가 없음 — export 실패"
+        n_weight_q = self._export_graph(model, args.out)
         print(f"[5] 가중치 Q/DQ {n_weight_q}개 (QuantConv2d {self.n_quant}개)")
 
         # ORT 의 int8 커널 최적화를 끄고 (Q/DQ 를 float 로 그대로 계산) torch 가짜 양자화와 비교
@@ -401,18 +417,34 @@ class QatTrainer:
         print(f"[5] torch(가짜 양자화) vs onnxruntime(Q/DQ) 마스크 일치 평균 {np.mean(agreements):.3f}%  "
               "(반올림 경계에서 커널별 float 오차에 민감해 100% 는 안 나옴. 99% 이상 정상, 90% 아래면 export 문제)")
 
-        spec.normalize_in_graph, spec.argmax_in_graph = True, True
-        save_spec(args.out.with_suffix(args.out.suffix + ".json"), spec,
-                  onnx_input="input", onnx_output="mask", opset=args.opset,
-                  quantization="qat_qdq_int8", source_ckpt=str(args.ckpt), classes=self.classes,
-                  qat=dict(iters=args.iters, lr=args.lr, batch=args.batch, calib_batches=args.calib_batches,
-                           calib_method=args.calib_method,
-                           calib_augmentation=not args.calib_no_aug, seed=args.seed, workers=args.workers,
-                           conv_quantized=self.n_quant, bn_fused=self.n_fused, act_calib=self.act_calib,
-                           selection=self.selection, results=self.results),
-                  torch_version=torch.__version__, exported_at=time.strftime("%Y-%m-%d %H:%M:%S"))
+        qat_info = dict(iters=args.iters, lr=args.lr, batch=args.batch, calib_batches=args.calib_batches,
+                        calib_method=args.calib_method,
+                        calib_augmentation=not args.calib_no_aug, seed=args.seed, workers=args.workers,
+                        conv_quantized=self.n_quant, bn_fused=self.n_fused,
+                        quant_adds=dict(enabled=not args.no_quant_adds, residual_blocks=self.n_res_adds,
+                                        fusion_adds=self.n_fusion_adds,
+                                        note="skip/Add 입력에 Q/DQ → TensorRT 가 conv+Add 를 INT8 로 묶음 (없으면 FP16 conv + 변환 커널)"),
+                        act_calib=self.act_calib, selection=self.selection, results=self.results)
+
+        def write_manifest(path: Path, argmax: bool):
+            spec.normalize_in_graph, spec.argmax_in_graph = True, argmax
+            save_spec(path.with_suffix(path.suffix + ".json"), spec,
+                      onnx_input="input", onnx_output="mask" if argmax else "logits", opset=args.opset,
+                      quantization="qat_qdq_int8", source_ckpt=str(args.ckpt), classes=self.classes, qat=qat_info,
+                      torch_version=torch.__version__, exported_at=time.strftime("%Y-%m-%d %H:%M:%S"))
+
+        write_manifest(args.out, argmax=True)
         (args.out.parent / "qat_results.json").write_text(json.dumps(self.results, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"[done] {args.out} (+ .json)  → Jetson: python -m deploy.build_engine --onnx {args.out} --precision qat")
+
+        if getattr(args, "also_logits", False):
+            # 같은 가중치·scale 로 argmax 없는 로짓 출력 그래프. 카메라 앱(softmax 신뢰도)용. 재학습 없이 한 번에 만든다
+            logits_path = args.out.with_name(args.out.stem + "_logits" + args.out.suffix)
+            model.argmax = False
+            n_logits_q = self._export_graph(model, logits_path)
+            assert n_logits_q == n_weight_q, f"로짓 그래프의 가중치 Q/DQ 수가 다름 ({n_logits_q} vs {n_weight_q})"
+            write_manifest(logits_path, argmax=False)
+            print(f"[done] {logits_path} (+ .json)  로짓 출력 [1,3,H,W] float  → build_engine --precision qat")
 
 
 # ---------- main ----------
@@ -451,6 +483,10 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--opset", type=int, default=17)
+    parser.add_argument("--no-quant-adds", action="store_true",
+                        help="잔차·fusion Add 입력에 Q/DQ 를 넣지 않음 (옛 그래프 재현용). 기본은 넣어서 Add 를 INT8 로 돌림")
+    parser.add_argument("--also-logits", action="store_true",
+                        help="argmax 없는 로짓 출력 ONNX(<out stem>_logits.onnx + .json)도 함께 내보냄 (카메라 앱 softmax 신뢰도용)")
     return parser.parse_args()
 
 
