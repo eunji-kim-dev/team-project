@@ -1,0 +1,96 @@
+{
+  "input_size": [
+    480,
+    640
+  ],
+  "mean": [
+    123.675,
+    116.28,
+    103.53
+  ],
+  "std": [
+    58.395,
+    57.12,
+    57.375
+  ],
+  "color_order": "RGB",
+  "num_classes": 3,
+  "input_range": 255.0,
+  "normalize_in_graph": true,
+  "argmax_in_graph": true,
+  "onnx_input": "input",
+  "onnx_output": "mask",
+  "opset": 17,
+  "quantization": "qat_qdq_int8",
+  "source_ckpt": "checkpoints/best_mIoU_iter_1600.pth",
+  "classes": [
+    "floor",
+    "obstacle",
+    "other"
+  ],
+  "qat": {
+    "iters": 0,
+    "lr": 0.0001,
+    "batch": 4,
+    "calib_batches": 16,
+    "conv_quantized": 45,
+    "bn_fused": 44,
+    "results": {
+      "fp32": {
+        "miou": 0.9319440810600844,
+        "iou": [
+          0.8889,
+          0.9626,
+          0.9444
+        ],
+        "pixel_acc": 0.9726586288060898
+      },
+      "fp32_fused": {
+        "miou": 0.9319440810600844,
+        "iou": [
+          0.8889,
+          0.9626,
+          0.9444
+        ],
+        "pixel_acc": 0.9726586288060898
+      },
+      "ptq_sim": {
+        "miou": 0.9296479055161332,
+        "iou": [
+          0.8863,
+          0.9614,
+          0.9412
+        ],
+        "pixel_acc": 0.9718042618189102
+      },
+      "qat": {
+        "miou": 0.9296479055161332,
+        "iou": [
+          0.8863,
+          0.9614,
+          0.9412
+        ],
+        "pixel_acc": 0.9718042618189102
+      }
+    }
+  },
+  "torch_version": "2.12.0+cu132",
+  "exported_at": "2026-10-30 10:22:38",
+  "source_onnx": "models/fast_scnn_qat_0iter.onnx",
+  "built_at": "2026-10-30 10:24:34",
+  "build": {
+    "precision": "qat",
+    "build_seconds": 8.9,
+    "engine_size_mb": 2.36,
+    "trt_version": "10.16.2.10",
+    "workspace_mb": 2048,
+    "tf32": null,
+    "layer_precisions": {
+      "FP32": 22,
+      "INT8": 49,
+      "FP16": 14,
+      "INT32": 1,
+      "total_layers": 86
+    }
+  }
+}

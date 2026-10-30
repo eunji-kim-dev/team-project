@@ -33,12 +33,12 @@ checkpoints/
 *.pth
 
 # 변환 산출물. .engine 은 만든 보드·TensorRT 버전 전용이라 공유 의미 없음
-models/*.onnx
-models/*.engine
-models/*.trt
-models/*.plan
-models/*.calib
-models/timing.cache
+models/**/*.onnx
+models/**/*.engine
+models/**/*.trt
+models/**/*.plan
+models/**/*.calib
+models/**/timing.cache
 
 # 벤치·학습 결과, 로그
 results/
