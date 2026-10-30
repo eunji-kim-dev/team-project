@@ -135,6 +135,17 @@ class RGBMaskDataset(Dataset):
         return x, torch.from_numpy(label.astype(np.int64))
 
 
+def make_calibration_loader(train_loader: DataLoader, no_aug: bool) -> DataLoader:
+    """기존 샘플링은 유지하고, 요청한 경우 캘리브레이션용 복사본의 증강만 끈다."""
+    if not no_aug:
+        return train_loader
+    calib_set = copy.copy(train_loader.dataset)
+    calib_set.train = False   # 원본 학습 데이터셋의 증강 설정은 건드리지 않음
+    # 별도 generator / 미리보기 iterator를 만들지 않아 기존 RNG와 샘플 순서를 유지.
+    return DataLoader(calib_set, batch_size=train_loader.batch_size, shuffle=True,
+                      num_workers=train_loader.num_workers, drop_last=train_loader.drop_last)
+
+
 # ---------- 평가 ----------
 
 @torch.no_grad()
@@ -216,8 +227,13 @@ class QatTrainer:
         self.n_fused = quant.fuse_conv_bn(self.model)
         self._eval("fp32_fused", f"[2] BN 접음 {self.n_fused}개 ")
 
-        self.n_quant = quant.quantize_convs(self.model)
-        calib_batches = (x for i, (x, _) in zip(range(self.args.calib_batches), self.train_loader))
+        self.n_quant = quant.quantize_convs(self.model, calib_method=self.args.calib_method)
+        calib_loader = make_calibration_loader(self.train_loader, self.args.calib_no_aug)
+        n_calib_batches = min(self.args.calib_batches, len(calib_loader))
+        print(f"[calib] method={self.args.calib_method}, augmentation={'off' if self.args.calib_no_aug else 'on'}, "
+              f"{n_calib_batches} batches x {self.args.batch} = {n_calib_batches * self.args.batch} images, "
+              f"seed={self.args.seed}")
+        calib_batches = (x for i, (x, _) in zip(range(self.args.calib_batches), calib_loader))
         quant.calibrate(self.model, calib_batches, self.device)
         print(f"[3] {quant.quant_summary(self.model)}")
         self._eval("ptq_sim", "[3] PTQ 흉내        ")
@@ -313,6 +329,8 @@ class QatTrainer:
                   onnx_input="input", onnx_output="mask", opset=args.opset,
                   quantization="qat_qdq_int8", source_ckpt=str(args.ckpt), classes=self.classes,
                   qat=dict(iters=args.iters, lr=args.lr, batch=args.batch, calib_batches=args.calib_batches,
+                           calib_method=args.calib_method,
+                           calib_augmentation=not args.calib_no_aug, seed=args.seed, workers=args.workers,
                            conv_quantized=self.n_quant, bn_fused=self.n_fused, results=self.results),
                   torch_version=torch.__version__, exported_at=time.strftime("%Y-%m-%d %H:%M:%S"))
         (args.out.parent / "qat_results.json").write_text(json.dumps(self.results, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -339,6 +357,10 @@ def parse_args():
     parser.add_argument("--lr", type=float, default=1e-4, help="원 학습(5e-4)보다 낮게. 1e-5~1e-4")
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--calib-batches", type=int, default=16)
+    parser.add_argument("--calib-method", choices=("ema", "max"), default="ema",
+                        help="활성화 scale 집계: ema=기존 지수이동평균, max=전체 관측 최대 절댓값")
+    parser.add_argument("--calib-no-aug", action="store_true",
+                        help="캘리브레이션 증강만 끔. QAT 학습 증강과 샘플링 설정은 유지")
     parser.add_argument("--eval-every", type=int, default=50)
     parser.add_argument("--workers", type=int, default=2, help="Windows 면 0 권장")
     parser.add_argument("--seed", type=int, default=42)

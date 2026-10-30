@@ -48,14 +48,17 @@ def fake_quant(x, scale, axis=-1):
 
 
 class ActQuantizer(nn.Module):
-    """활성화(conv 입력) 양자화기. calibrating 동안 |x| 최댓값을 EMA 로 모아 scale 정하고 그 뒤엔 고정"""
+    """활성화(conv 입력) 양자화기. 배치별 |x| 최댓값을 EMA 또는 누적 max로 모아 scale을 정한 뒤 고정."""
 
-    def __init__(self, momentum: float = 0.9):
+    def __init__(self, momentum: float = 0.9, method: str = "ema"):
         super().__init__()
+        if method not in ("ema", "max"):
+            raise ValueError(f"지원하지 않는 캘리브레이션 방식: {method}")
         self.register_buffer("scale", torch.tensor(1.0))   # 0-d → ONNX 에서 per-tensor 스칼라
-        self.register_buffer("amax", torch.tensor(0.0))    # |x| 최댓값 EMA
+        self.register_buffer("amax", torch.tensor(0.0))    # EMA 또는 누적 |x| 최댓값
         self.register_buffer("n_obs", torch.tensor(0))     # 본 배치 수
         self.momentum = momentum
+        self.method = method
         self.calibrating = False   # True: scale 재는 중 (양자화 안 함)
         self.enabled = True        # False: 양자화 끄고 float 통과 (비교용)
 
@@ -64,6 +67,8 @@ class ActQuantizer(nn.Module):
             current_amax = x.detach().abs().amax()
             if self.n_obs.item() == 0:
                 self.amax.copy_(current_amax)
+            elif self.method == "max":
+                self.amax.copy_(torch.maximum(self.amax, current_amax))
             else:
                 self.amax.mul_(self.momentum).add_(current_amax * (1 - self.momentum))
             self.n_obs += 1
@@ -77,10 +82,10 @@ class ActQuantizer(nn.Module):
 class QuantConv2d(nn.Module):
     """nn.Conv2d 감싸서 입력(per-tensor)·가중치(per-channel)에 가짜 양자화 끼움"""
 
-    def __init__(self, conv: nn.Conv2d):
+    def __init__(self, conv: nn.Conv2d, calib_method: str = "ema"):
         super().__init__()
         self.conv = conv
-        self.input_quant = ActQuantizer()
+        self.input_quant = ActQuantizer(method=calib_method)
         self.register_buffer("w_scale", torch.ones(conv.out_channels))   # export 때 고정되는 가중치 scale
         self.w_scale_frozen = False   # 학습 중엔 매번 가중치에서 계산, export 땐 상수
 
@@ -122,14 +127,16 @@ def fuse_conv_bn(model: nn.Module) -> int:
     return fused_count
 
 
-def quantize_convs(model: nn.Module, skip: tuple[str, ...] = ()) -> int:
+def quantize_convs(model: nn.Module, skip: tuple[str, ...] = (), *, calib_method: str = "ema") -> int:
     """모든 nn.Conv2d 를 QuantConv2d 로 교체. skip 접두사는 건너뜀. 바꾼 개수 반환"""
+    if calib_method not in ("ema", "max"):
+        raise ValueError(f"지원하지 않는 캘리브레이션 방식: {calib_method}")
     replaced = 0
     for parent_name, parent in list(model.named_modules()):
         for child_name, child in list(parent.named_children()):
             full_name = f"{parent_name}.{child_name}" if parent_name else child_name
             if isinstance(child, nn.Conv2d) and not any(full_name.startswith(prefix) for prefix in skip):
-                setattr(parent, child_name, QuantConv2d(child))
+                setattr(parent, child_name, QuantConv2d(child, calib_method=calib_method))
                 replaced += 1
     return replaced
 
