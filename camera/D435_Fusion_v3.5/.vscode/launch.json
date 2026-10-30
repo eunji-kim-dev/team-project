@@ -1,0 +1,28 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "D435 Fusion v3.5 - Live",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/v3.5.py",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "args": [
+        "--fps",
+        "15"
+      ],
+      "justMyCode": true,
+      "env": {
+        "PYTHONUTF8": "1"
+      },
+      "pythonArgs": [
+        "-B",
+        "-X",
+        "utf8",
+        "-X",
+        "frozen_modules=off"
+      ]
+    }
+  ]
+}

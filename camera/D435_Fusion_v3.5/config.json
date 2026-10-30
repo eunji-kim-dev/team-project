@@ -1,0 +1,174 @@
+{
+  "camera": {
+    "height_m": 0.74,
+    "roll_deg": 0,
+    "pitch_deg": 0,
+    "yaw_deg": 0,
+    "target_fps": 15
+  },
+  "depth": {
+    "min_m": 0.2,
+    "max_m": 6,
+    "min_valid_fraction": 0.08,
+    "bilateral": false,
+    "bilateral_sigma_m": 0.025,
+    "neighbor_outlier": false,
+    "neighbor_delta_m": 0.04,
+    "neighbor_min": 2
+  },
+  "floor": {
+    "seed_height_tolerance_m": 0.2,
+    "max_height_error_m": 0.12,
+    "max_tilt_deg": 12,
+    "inlier_distance_m": 0.025,
+    "min_points": 180,
+    "min_ratio": 0.25,
+    "min_extent_x_m": 0.5,
+    "min_extent_y_m": 0.3,
+    "ransac_iterations": 70,
+    "max_samples": 3500
+  },
+  "grid": {
+    "resolution_m": 0.05,
+    "x_min_m": 0,
+    "x_max_m": 6,
+    "y_min_m": -3,
+    "y_max_m": 3,
+    "obstacle_min_height_m": 0.05,
+    "obstacle_max_height_m": 0.8,
+    "robot_height_is_provisional": false,
+    "free_vertical_step_m": 0.1,
+    "free_depth_margin_m": 0.035,
+    "min_obstacle_points": 1,
+    "obstacle_hold_s": 0.5,
+    "obstacle_stale_s": 3,
+    "free_stale_s": 1,
+    "clear_confirmations": 2,
+    "visibility_policy": "valid_center",
+    "visibility_min_neighbors": 5,
+    "free_space_policy": "observed_floor"
+  },
+  "robot": {
+    "radius_m": 0.2,
+    "safety_margin_m": 0.05,
+    "inflation_radius_m": 0.4,
+    "cost_scaling_per_m": 6,
+    "width_m": 0.4,
+    "forbidden_radius_m": 0.25,
+    "inflation_extra_m": 0.15,
+    "cost_direction": "camera_visible"
+  },
+  "processing": {
+    "max_hz": 15,
+    "max_frame_age_s": 0.6,
+    "display_max_points": 50000,
+    "display_voxel_m": 0.015,
+    "cloud_save_voxel_m": 0
+  },
+  "view": {
+    "width": 1900,
+    "height": 980,
+    "azimuth_deg": 0,
+    "elevation_deg": 25,
+    "show_untextured_points": false,
+    "costmap_view": "top",
+    "cloud_mode": "obstacle_low_angle"
+  },
+  "semantics": {
+    "enabled": true,
+    "model_dir": "models",
+    "overlay_alpha": 0.4,
+    "note": "Same-frame SCNN + measured Depth; inferred ground-free provenance is saved separately.",
+    "torch_threads": 2
+  },
+  "mapping": {
+    "mode": "camera_relative"
+  },
+  "fusion": {
+    "enabled": true,
+    "floor_confidence": 0.7,
+    "obstacle_confidence": 0.75,
+    "boundary_erode_px": 1,
+    "use_floor_seeds": true,
+    "semantic_floor_tolerance_m": 0.04,
+    "semantic_obstacle_min_height_m": 0.05,
+    "semantic_obstacle_min_points": 2,
+    "defer_floor_obstacle_conflict": true,
+    "floor_obstacle_confidence": 0.85,
+    "semantic_free_enabled": true,
+    "semantic_free_confidence": 0.9,
+    "semantic_free_continuity_enabled": true,
+    "semantic_free_continuity_confidence": 0.75,
+    "semantic_free_continuity_distance_m": 0.15
+  },
+  "obstacle_support": {
+    "enabled": true,
+    "min_neighbors": 2,
+    "depth_jump_base_m": 0.025,
+    "depth_jump_per_m2": 0.003
+  },
+  "recovery": {
+    "enabled": true,
+    "retry_interval_s": 2.0,
+    "ui_wait_ms": 30
+  },
+  "low_angle": {
+    "costmap_eye_height_m": 0.2,
+    "costmap_eye_back_m": 0.2,
+    "costmap_pitch_deg": 12.0,
+    "costmap_hfov_deg": 85.0,
+    "cloud_center_y_fraction": 0.5
+  },
+  "high_angle": {
+    "costmap_eye_height_m": 1.25,
+    "costmap_eye_back_m": 0.1,
+    "costmap_pitch_deg": -25.0,
+    "costmap_hfov_deg": 85.0,
+    "cloud_center_y_fraction": 0.5
+  },
+  "candidate_review": {
+    "enabled": true,
+    "max_component_points": 60,
+    "max_height_m": 0.15,
+    "max_vertical_span_m": 0.06,
+    "max_xy_span_m": 0.15,
+    "semantic_strong_fraction": 0.5,
+    "local_floor_enabled": true,
+    "local_radius_m": 0.25,
+    "local_inner_radius_m": 0.025,
+    "local_min_points": 80,
+    "local_max_samples": 2200,
+    "local_min_extent_m": 0.1,
+    "local_min_sectors": 3,
+    "local_max_rmse_m": 0.015,
+    "local_max_tilt_deg": 12.0,
+    "local_max_shift_m": 0.04,
+    "local_min_inlier_ratio": 0.6,
+    "max_local_checks": 32
+  },
+  "temporal_review": {
+    "enabled": true,
+    "confirm_frames": 3,
+    "match_xy_m": 0.08,
+    "match_z_m": 0.06,
+    "max_gap_s": 0.8,
+    "motion_flow_px": 0.8,
+    "motion_rotation_deg": 0.3,
+    "motion_scale_delta": 0.006,
+    "motion_depth_delta_m": 0.04,
+    "motion_depth_fraction": 0.25,
+    "motion_min_tracks": 20,
+    "motion_min_inlier_ratio": 0.55
+  },
+  "pointcloud_color": {
+    "mode": "rainbow",
+    "min_distance_m": 0.3,
+    "max_distance_m": 5.5,
+    "display_max_points": 12000
+  },
+  "recording": {
+    "fps": 15,
+    "max_width": 1920,
+    "max_height": 1080
+  }
+}

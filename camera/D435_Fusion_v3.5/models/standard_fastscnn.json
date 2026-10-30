@@ -1,0 +1,29 @@
+{
+  "schema": "fastscnn-rgb-v1",
+  "input": {
+    "width": 640,
+    "height": 480,
+    "color_order": "RGB",
+    "scale": 1.0,
+    "mean": [
+      123.675,
+      116.28,
+      103.53
+    ],
+    "std": [
+      58.395,
+      57.12,
+      57.375
+    ]
+  },
+  "output": {
+    "kind": "logits",
+    "layout": "NCHW",
+    "class_ids": [
+      0,
+      1,
+      2
+    ]
+  },
+  "architecture": "Team MMSegmentation FastSCNN"
+}
