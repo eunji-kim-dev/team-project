@@ -23,6 +23,7 @@ team-project/
 │   ├─ power_sweep.py        모델별 전력·온도 → docs/power_table.md
 │   ├─ soak_test.py          장시간 안정성
 │   ├─ quant_sensitivity.py  INT8 블록별 민감도 → docs/quant_sensitivity.md
+│   ├─ confidence_agreement.py  카메라 앱 판정 기준(클래스+softmax 신뢰도≥기준값)으로 본 엔진 간 일치율 → docs/confidence_agreement.md
 │   ├─ parse_tegrastats.py / tegrastats_log.sh   전력 로그 기록·요약
 ├─ models/      모델 매니페스트(.json)만 올린다. .onnx/.engine 은 각자 보드에서 생성
 │   ├─ calib_*/   캘리브레이션 실험별 매니페스트
