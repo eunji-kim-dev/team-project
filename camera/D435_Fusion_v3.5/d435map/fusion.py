@@ -14,7 +14,7 @@ def sample_semantics(semantic,frame_id,shape,uv,color_ok,cfg):
     if semantic.frame_id!=frame_id:
         info["reason"]="semantic frame mismatch";return labels,confidence,info
     mask=semantic.labels;score=getattr(semantic,"confidence",None)
-    if not isinstance(mask,np.ndarray) or mask.shape!=shape or mask.dtype!=np.uint8 or not np.isin(mask,[0,1,2]).all():
+    if not isinstance(mask,np.ndarray) or mask.shape!=shape or mask.dtype!=np.uint8 or mask.max()>2:   # [Jetson 속도] uint8 이라 isin([0,1,2]) 과 동치
         info["reason"]="invalid semantic labels";return labels,confidence,info
     if not isinstance(score,np.ndarray) or score.shape!=shape or not np.isfinite(score).all() or np.any((score<0)|(score>1)):
         info["reason"]="valid softmax confidence unavailable";return labels,confidence,info
@@ -31,8 +31,9 @@ def sample_semantics(semantic,frame_id,shape,uv,color_ok,cfg):
         pixels=np.rint(uv[ids]).astype(np.int32)
         inside=(pixels[:,0]>=0)&(pixels[:,0]<shape[1])&(pixels[:,1]>=0)&(pixels[:,1]<shape[0])
         ids=ids[inside];pixels=pixels[inside];u,v=pixels.T
-        ids=ids[interior[v,u]];u,v=np.rint(uv[ids]).astype(np.int32).T
-        labels[ids]=mask[v,u];confidence[ids]=score[v,u]
+        flat=v*shape[1]+u   # [Jetson 속도] 평면 인덱스 한 번으로 세 배열을 읽는다 (같은 값)
+        keep=interior.ravel()[flat];ids=ids[keep];flat=flat[keep]
+        labels[ids]=mask.ravel()[flat];confidence[ids]=score.ravel()[flat]
     info.update(active=True,reason="same-frame calibrated semantic-depth fusion",mapped_points=int((labels!=255).sum()))
     return labels,confidence,info
 

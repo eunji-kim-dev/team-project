@@ -18,16 +18,16 @@ def horizontal_view(grid,intr,T,height_max,plane=None):
     # [v3.5 지연 개선] roll/pitch=0이면 높이가 수평 방위각에 영향을 주지 않는다.
     # 이 경우 같은 방위각을 네 높이에서 반복 계산할 필요가 없다. 기울어진 설치는 원래 검사 유지.
     if T[2,0]==0 and T[2,2]==0:heights=heights[:1]
-    for dx,dy in offsets:
-        q=xy+[dx,dy]
-        base_z=np.zeros(len(q))
-        if plane is not None and plane.ok:
-            n=np.asarray(plane.normal);base_z=-(q@n[:2]+plane.offset_m)/n[2]
-        for z in heights:
-            world=np.column_stack((q,base_z+z))
-            optical=(world-T[:3,3])@T[:3,:3]
-            bearing=np.arctan2(optical[:,0],optical[:,2])
-            visible |= (optical[:,2]>0)&(bearing>=left)&(bearing<=right)
+    # [Jetson 속도] 다섯 표본 위치를 한 배열(5, 셀)로 계산. 원소별 연산 뒤 OR 로 합치므로 루프 결과와 같다.
+    q=xy[None,:,:]+np.asarray(offsets,dtype=float)[:,None,:]
+    base_z=np.zeros(q.shape[:2])
+    if plane is not None and plane.ok:
+        n=np.asarray(plane.normal);base_z=-(q@n[:2]+plane.offset_m)/n[2]
+    for z in heights:
+        world=np.concatenate((q,(base_z+z)[...,None]),axis=-1)
+        optical=(world-T[:3,3])@T[:3,:3]
+        bearing=np.arctan2(optical[...,0],optical[...,2])
+        visible |= np.any((optical[...,2]>0)&(bearing>=left)&(bearing<=right),axis=0)
     return visible.reshape(grid.shape),dict(native_depth_hfov_deg=float(np.rad2deg(right-left)),
         left_edge_deg=float(np.rad2deg(left)),right_edge_deg=float(np.rad2deg(right)),
         definition="native depth horizontal FOV; cell-center/corners across robot height; vertical blind spots remain inside unknown")

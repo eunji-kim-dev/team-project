@@ -48,41 +48,43 @@ def projected_floor_free(grid,semantic,frame_id,plane,T,cal,raw,in_view,blocked,
     camera_height_above_plane=(n@T[:3,3]+plane.offset_m)/n[2]
     ext=cal["depth_to_color"];R=np.asarray(ext["rotation"]).reshape(3,3,order="F")
     translation=np.asarray(ext["translation_m"])
-    for index,offset in enumerate(((0,0),(-half,-half),(-half,half),(half,-half),(half,half))):
-        qxy=xy+offset
-        z=-(qxy@n[:2]+plane.offset_m)/n[2]
-        floor=np.column_stack((qxy,z))
-        optical=(floor-T[:3,3])@T[:3,:3]
-        color=optical@R.T+translation
-        uv=project(color,cal["color_intrinsics"]);u,v=np.rint(uv).astype(np.int32).T
-        within=(color[:,2]>0)&(u>=0)&(v>=0)&(u<expected[1])&(v<expected[0])
-        su,sv=np.clip(u,0,expected[1]-1),np.clip(v,0,expected[0]-1)
-        ok &= within&(interior[sv,su]>0)
-        if continuity:
-            # [v3.5] 연결 보완: 중심+모서리 모두 바닥 라벨, 중심 포함 3/5는 점수 기준 통과.
-            # RGB 장애물/천장 라벨을 덮어 칠하지 않고 기존 바닥 내부 빈틈만 연결한다.
-            trusted=(labels[sv,su]==0)&(score[sv,su]>=f["semantic_free_continuity_confidence"])
-            relaxed &= within&(labels[sv,su]==0)
-            if index==0:relaxed &= trusted
-            votes += trusted
-        dn=project(optical,cal["depth_intrinsics"]);du,dv=np.rint(dn).astype(np.int32).T
-        native=(du>=0)&(dv>=0)&(du<raw.shape[1])&(dv<raw.shape[0])
-        measured=raw[np.clip(dv,0,raw.shape[0]-1),np.clip(du,0,raw.shape[1]-1)]
-        tolerance=np.maximum(.08,.01*optical[:,2]**2)
-        valid_range=native&(optical[:,2]>=config["depth"]["min_m"])&(optical[:,2]<=config["depth"]["max_m"])
-        agreement=(measured<=0)|(~np.isfinite(measured))|(np.abs(measured-optical[:,2])<=tolerance)
-        ok &= valid_range&agreement
-        if continuity:
-            # [v3.5] 경사 시선에서는 작은 바닥 높이 오차가 큰 Z 차이로 변환된다.
-            # 같은 광선의 측정점 높이 = 카메라의 평면 위 높이 * (1 - 측정Z/바닥Z).
-            # 연결 단계는 실제 장애물 기준 5cm를 넘는 표면을 가림으로 거부하고,
-            # 3/5 표본의 바닥 높이 일치 또는 결측(추정)을 요구한다.
-            present=np.isfinite(measured)&(measured>0)
-            sample_height=camera_height_above_plane*(1-measured/np.maximum(optical[:,2],1e-6))
-            nearer=present&(sample_height>=config["grid"]["obstacle_min_height_m"])
-            height_agreement=(~present)|(np.abs(sample_height)<=f["semantic_floor_tolerance_m"])
-            relaxed &= valid_range&~nearer
-            depth_votes += height_agreement
+    # [Jetson 속도] 다섯 표본 위치를 한 배열(5, 셀)로 계산. 원소별 연산 뒤 AND/합으로 합치므로 루프 결과와 같다.
+    offsets=np.array(((0,0),(-half,-half),(-half,half),(half,-half),(half,half)))
+    qxy=xy[None,:,:]+offsets[:,None,:]                                       # (5, C, 2)
+    z=-(qxy@n[:2]+plane.offset_m)/n[2]
+    floor=np.concatenate((qxy,z[...,None]),axis=-1)
+    optical=(floor-T[:3,3])@T[:3,:3]
+    color=optical@R.T+translation
+    iuv=np.rint(project(color,cal["color_intrinsics"])).astype(np.int32);u=iuv[...,0];v=iuv[...,1]
+    within=(color[...,2]>0)&(u>=0)&(v>=0)&(u<expected[1])&(v<expected[0])
+    su,sv=np.clip(u,0,expected[1]-1),np.clip(v,0,expected[0]-1)
+    sampled_labels=labels[sv,su]
+    ok_all=within&(interior[sv,su]>0)
+    if continuity:
+        trusted=(sampled_labels==0)&(score[sv,su]>=f["semantic_free_continuity_confidence"])
+        relaxed_all=within&(sampled_labels==0)
+        relaxed_all[0]&=trusted[0]
+        votes=trusted.sum(axis=0).astype(np.uint8)
+    idn=np.rint(project(optical,cal["depth_intrinsics"])).astype(np.int32);du=idn[...,0];dv=idn[...,1]
+    native=(du>=0)&(dv>=0)&(du<raw.shape[1])&(dv<raw.shape[0])
+    measured=raw[np.clip(dv,0,raw.shape[0]-1),np.clip(du,0,raw.shape[1]-1)]
+    oz=optical[...,2]
+    tolerance=np.maximum(.08,.01*oz**2)
+    valid_range=native&(oz>=config["depth"]["min_m"])&(oz<=config["depth"]["max_m"])
+    agreement=(measured<=0)|(~np.isfinite(measured))|(np.abs(measured-oz)<=tolerance)
+    ok_all&=valid_range&agreement
+    ok&=np.all(ok_all,axis=0)
+    if continuity:
+        # [v3.5] 경사 시선에서는 작은 바닥 높이 오차가 큰 Z 차이로 변환된다.
+        # 같은 광선의 측정점 높이 = 카메라의 평면 위 높이 * (1 - 측정Z/바닥Z).
+        # 연결 단계는 실제 장애물 기준 5cm를 넘는 표면을 가림으로 거부하고,
+        # 3/5 표본의 바닥 높이 일치 또는 결측(추정)을 요구한다.
+        present=np.isfinite(measured)&(measured>0)
+        sample_height=camera_height_above_plane*(1-measured/np.maximum(oz,1e-6))
+        nearer=present&(sample_height>=config["grid"]["obstacle_min_height_m"])
+        height_agreement=(~present)|(np.abs(sample_height)<=f["semantic_floor_tolerance_m"])
+        relaxed&=np.all(relaxed_all&valid_range&~nearer,axis=0)
+        depth_votes=height_agreement.sum(axis=0).astype(np.uint8)
     out[cells[ok,0],cells[ok,1]]=True
     info["candidate_cells"]=int(out.sum())
     allowed=np.zeros(grid.shape,bool)

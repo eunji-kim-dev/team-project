@@ -122,7 +122,7 @@ def colorize(optical, color_bgr, calibration):
         front[ordered[starts]]=np.minimum.reduceat(pc[idx[order],2],starts)
     good[idx]&=pc[idx,2]<=front[v[idx]*w+u[idx]]+0.03
     rgb=np.full((len(optical),3),130,np.uint8)
-    rgb[good]=color_bgr[v[good],u[good],::-1]
+    rgb[good]=color_bgr.reshape(-1,3)[v[good]*w+u[good],::-1]   # [Jetson 속도] 2차원 fancy index 대신 평면 인덱스 (같은 값)
     return rgb, uv, good, pc[:,2]
 
 def voxel_indices(points, size):

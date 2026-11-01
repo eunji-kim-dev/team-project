@@ -28,9 +28,12 @@ def fit_floor(points, cfg):
         candidates=candidates[rng.choice(len(candidates),cfg["max_samples"],replace=False)]
     cos_limit=np.cos(np.deg2rad(cfg["max_tilt_deg"]))
     best=None; score=0
-    for _ in range(cfg["ransac_iterations"]):
-        a,b,c=candidates[rng.choice(len(candidates),3,replace=False)]
-        n=np.cross(b-a,c-a); norm=np.linalg.norm(n)
+    # [Jetson 속도] 반복마다 np.cross 를 부르면 파이썬 오버헤드가 크다. 같은 난수 순서로 표본 3점을 먼저 모두 뽑고 외적을 한 번에 계산한다.
+    # 외적은 성분별 곱·차라서 묶어 계산해도 값이 같고, 이후 정규화·판정·내적은 반복문 그대로라 결과가 동일하다.
+    samples=np.array([rng.choice(len(candidates),3,replace=False) for _ in range(cfg["ransac_iterations"])],dtype=np.int64).reshape(-1,3)
+    A=candidates[samples[:,0]];normals=np.cross(candidates[samples[:,1]]-A,candidates[samples[:,2]]-A)
+    for a,n in zip(A,normals):
+        norm=np.linalg.norm(n)
         if norm<1e-8: continue
         n=n/norm
         if n[2]<0: n=-n
