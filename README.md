@@ -14,6 +14,7 @@ team-project/
 │   ├─ qat_train.py       QAT INT8 학습 → Q/DQ ONNX   (quant.py, trt_scales.py 가 보조)
 │   ├─ inspect_engine.py  엔진 레이어 정보 추출
 │   ├─ profile_engine.py  엔진 층별 실행 시간·정밀도 프로파일 (엔진 간 속도 차이 원인 분석)
+│   ├─ add_decode.py      로짓 ONNX 에 argmax·softmax 신뢰도 출력을 붙임 (카메라 앱 GPU 디코드 엔진용)
 │   ├─ qat_sensitivity.py 블록별 양자화 진단
 │   ├─ preprocess.py      입력 전처리 공통 (리사이즈·채널 순서·정규화)
 │   ├─ cuda_util.py       CUDA 메모리·스트림 얇은 래퍼
@@ -24,6 +25,8 @@ team-project/
 │   ├─ soak_test.py          장시간 안정성
 │   ├─ quant_sensitivity.py  INT8 블록별 민감도 → docs/quant_sensitivity.md
 │   ├─ confidence_agreement.py  카메라 앱 판정 기준(클래스+softmax 신뢰도≥기준값)으로 본 엔진 간 일치율 → docs/confidence_agreement.md
+│   ├─ app_timing.py         카메라 앱 프레임별 로그(frame_log.csv) 요약: 단계별 p50/p95, 처리 fps, 드롭, 입력 나이 → docs/app_pipeline.md
+│   ├─ app_profile.py        카메라 앱 처리 파이프라인 함수별 프로파일·캡처 저장·최적화 전후 출력 비교
 │   ├─ parse_tegrastats.py / tegrastats_log.sh   전력 로그 기록·요약
 ├─ models/      모델 매니페스트(.json)만 올린다. .onnx/.engine 은 각자 보드에서 생성
 │   ├─ calib_*/   캘리브레이션 실험별 매니페스트
@@ -65,11 +68,13 @@ python v3.5.py            # 또는 Windows: run_camera.cmd
 - `models/` 에 모델 파일을 **정확히 하나** 두고 `standard_fastscnn.json` 과 함께 둔다.
   - `.pth` (state_dict 만 든 파일) → PyTorch CPU 추론
   - `.engine` + 같은 이름의 `.engine.json` → TensorRT GPU 추론 (Jetson).
-    엔진은 **로짓 출력**이어야 한다 (`export_onnx --keep-logits` 로 만든 ONNX 에서 빌드).
-    `models/` 의 벤치용 엔진은 argmax 가 그래프에 들어 있어 앱이 거부한다.
+    엔진은 **로짓 출력**(`export_onnx --keep-logits` ONNX 에서 빌드) 또는 **디코드 포함**(`deploy.add_decode` 로 labels·confidence 출력을 붙인 ONNX 에서 빌드, 매니페스트 `decode_in_graph`) 이어야 한다.
+    디코드 포함 엔진이면 앱의 CPU softmax(프레임당 약 15 ms)를 건너뛴다. `models/` 의 벤치용 엔진은 argmax 만 들어 있어 앱이 거부한다.
 - Windows 는 `camera/D435_Fusion_v3.5/requirements.txt`, Jetson 은 venv 에 `pyrealsense2` 만 추가로 설치한다.
   Jetson 에서 Windows 용 requirements.txt 를 설치하면 TensorRT/onnxruntime 스택이 깨진다.
 - Jetson 에서는 GUI 창이 필요하므로 `ssh -X` 터미널에서 실행하고 Q/Esc 로 종료한다 (창의 X 버튼은 GTK OpenCV 에서 비정상 종료).
+  화면 없이 측정만 하려면 `xvfb-run -a python v3.5.py --duration 180 --frame-log results/x/frame_log.csv` (프레임별 단계 시간 CSV + 조건 .json, 요약은 `python -m eval.app_timing`).
+  기본으로도 매 실행 `logs/frame_log_latest.csv` 가 남는다. 전체 파이프라인 측정과 병목 분석은 `docs/app_pipeline.md`.
 
 ## 깃 규칙
 

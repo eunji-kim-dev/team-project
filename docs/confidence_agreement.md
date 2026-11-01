@@ -81,6 +81,14 @@ fp32 열은 cpu_fp32 = gpu_fp32 = torch_cpu (세 값이 같다).
 기준값(config.json fusion)은 바꾸지 않았다. 앱 로더가 READY 로 올라오고 predict() 가 유효한 라벨·신뢰도를 내는 것까지 확인했다 (GUI 는 ssh -X 터미널에서 따로 확인).
 FP32 로 되돌리려면 INT8 두 파일을 빼고 `models/logits/fast_scnn_logits_fp32.engine` 과 그 `.json` 을 복사하면 된다 (폴더에 모델 파일은 정확히 하나).
 
+## GPU 디코드 엔진 (2026-11-01 14:55)
+
+앱의 CPU softmax 디코드(프레임당 약 15 ms)를 엔진 그래프로 옮긴 `models/calib_trt_adds/fast_scnn_qat_decode_int8.engine` (`deploy.add_decode` 로 로짓 ONNX 에
+Softmax→ReduceMax(confidence), ArgMax→Cast(labels) 를 붙여 빌드, sha a2bcc67acc2de136) 을 같은 도구로 확인했다 (`results/confidence_agreement_1101_decode/`).
+int8_decode vs int8(로짓 엔진 + CPU 디코드): argmax 일치 100.00%, |Δ신뢰도| 최대 0.000, 6개 판정 모두 뒤집힘 0 픽셀. Softmax·Reduce 층은 FP32 로 실행된다.
+같은 방법으로 만든 PTQ 디코드 엔진 `models/logits/fast_scnn_decode_int8.engine` (sha 는 매니페스트, 엔트로피 102장): fp32 대비 99.41% / |Δ신뢰도| 평균 0.0062, QAT 그래프 디코드 엔진 대비 99.94% / 평균 0.0007 (`results/confidence_agreement_1101_ptq_b/`).
+2026-11-01 15:50 부터 앱에는 PTQ 디코드 엔진이 들어가 있다 (`docs/app_pipeline.md`).
+
 ## 실행
 
 ```bash
