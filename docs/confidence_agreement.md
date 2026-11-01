@@ -19,7 +19,7 @@ softmax 신뢰도가 config 의 기준값 이상인 점만 채택하므로, 클�
   | 이름 | 파일 | 실행 | sha256 앞 16 |
   |---|---|---|---|
   | cpu_fp32 (기준) | `models/logits/fast_scnn_logits.onnx` | onnxruntime CPU FP32, 4 threads | e314afd29ea14bea |
-  | gpu_fp32 | `models/logits/fast_scnn_logits_fp32.engine` (앱에 현재 들어 있는 엔진) | TensorRT FP32 GPU | 4a36b1071afe4390 |
+  | gpu_fp32 | `models/logits/fast_scnn_logits_fp32.engine` (교체 전 앱에 들어 있던 엔진과 같은 파일) | TensorRT FP32 GPU | 4a36b1071afe4390 |
   | int8 | `models/calib_trt_adds/fast_scnn_qat_logits_int8.engine` (최종 QAT 엔진과 같은 가중치·scale, 로짓 출력) | TensorRT INT8(Q/DQ) GPU | cae54eb7c11a1aa8 |
   | torch_cpu | `checkpoints/best_mIoU_iter_1600.pth` 에서 state_dict 만 뽑은 파일 (앱이 PC 에서 쓰던 경로) | 앱 TorchBackend, PyTorch CPU FP32 | 9c67ad82cb9e1ef6 |
 
@@ -74,6 +74,12 @@ fp32 열은 cpu_fp32 = gpu_fp32 = torch_cpu (세 값이 같다).
 - 결론: 기준값을 그대로 두고 INT8 로짓 엔진으로 교체해도 앱 판정의 정답지 기준 정확도는 유지된다. 바뀌는 것은 "바닥을 1~3% 덜 믿는다"는 보수적 방향이고, 기준값을 조정할 근거는 없다
 - 사진별 (int8 vs cpu_fp32, 바닥 채택 뒤집힘%): 최대 0106 7.65%, 0073 6.41%, 0107 5.30%, 0077 5.08%; 최소 0038 0.59%. 바닥 픽셀이 적은 사진(0106 은 2.6만)에서 비율이 크다. `results/confidence_agreement_1101/per_image.csv`
 - 한계: 픽셀 단위 비교다. 앱은 깊이 점에서만 샘플링하고 평면 검증·격자 집계를 거치므로 지도 셀 단위의 차이는 이보다 작을 가능성이 크다 (추측, 아직 안 잼). 실제 카메라 프레임으로 두 엔진의 코스트맵을 비교하려면 저장된 캡처가 필요하다
+
+## 앱 엔진 교체 (2026-11-01)
+
+이 결과를 근거로 `camera/D435_Fusion_v3.5/models/` 의 FP32 로짓 엔진을 빼고 `fast_scnn_qat_logits_int8.engine` (+ `.engine.json`, sha cae54eb7c11a1aa8) 을 넣었다.
+기준값(config.json fusion)은 바꾸지 않았다. 앱 로더가 READY 로 올라오고 predict() 가 유효한 라벨·신뢰도를 내는 것까지 확인했다 (GUI 는 ssh -X 터미널에서 따로 확인).
+FP32 로 되돌리려면 INT8 두 파일을 빼고 `models/logits/fast_scnn_logits_fp32.engine` 과 그 `.json` 을 복사하면 된다 (폴더에 모델 파일은 정확히 하나).
 
 ## 실행
 
