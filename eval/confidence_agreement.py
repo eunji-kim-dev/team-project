@@ -11,7 +11,7 @@ python -m eval.confidence_agreement \\
   흔들리면 판정이 뒤집힌다. 이 도구는 그 뒤집힘을 앱이 쓰는 기준값마다 센다
 - 전처리·softmax 디코드는 앱 코드(d435map.semantics.prepare_input / decode_prediction)를 그대로 import 해서 쓰고,
   경계 1픽셀 제외는 fusion.sample_semantics 와 같은 규칙으로 적용한다. 기준값은 앱 config.json 의 fusion 블록에서 읽는다
-- 모델: .engine → 앱의 TrtBackend (로짓 출력 엔진만 통과), .onnx → onnxruntime CPU (cpu_fp32 기준행),
+- 모델: .engine → 앱의 TrtBackend (로짓 엔진 또는 decode_in_graph 엔진), .onnx → onnxruntime CPU (cpu_fp32 기준행),
   .pth → 앱의 TorchBackend (PyTorch CPU, 앱이 PC 에서 쓰던 경로)
 - 첫 모델이 기준. 기준 vs 나머지 모델을 전부 비교하고, --pairs a:b 로 다른 쌍을 더 비교한다
 - 지표 (쌍마다, 판정마다): 전체 픽셀 일치%, 판정 마스크 IoU, 뒤집힘% (= 다른 픽셀 / 기준 모델이 통과시킨 픽셀),
@@ -319,7 +319,10 @@ def main():
         for bgr in frames:   # 앱의 predict() 와 같은 순서
             tensor = semantics.prepare_input(bgr, spec, normalize)
             output = backend(tensor)
-            labels, conf = semantics.decode_prediction(output, spec, bgr.shape[:2])
+            if isinstance(output, tuple):   # decode_in_graph 엔진: GPU 가 argmax·신뢰도를 냄
+                labels, conf = semantics.decode_in_graph_result(output, spec, bgr.shape[:2])
+            else:
+                labels, conf = semantics.decode_prediction(output, spec, bgr.shape[:2])
             m["labels"].append(labels); m["conf"].append(conf); m["interior"].append(interior_mask(labels, erode))
         m["backend"] = backend.describe()
         m["normalize_on_cpu"] = normalize

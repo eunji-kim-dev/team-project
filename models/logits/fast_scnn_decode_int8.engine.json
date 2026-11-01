@@ -1,0 +1,67 @@
+{
+  "input_size": [
+    480,
+    640
+  ],
+  "mean": [
+    123.675,
+    116.28,
+    103.53
+  ],
+  "std": [
+    58.395,
+    57.12,
+    57.375
+  ],
+  "color_order": "RGB",
+  "num_classes": 3,
+  "input_range": 255.0,
+  "normalize_in_graph": true,
+  "argmax_in_graph": false,
+  "onnx_input": "input",
+  "onnx_output": [
+    "labels",
+    "confidence"
+  ],
+  "opset": 17,
+  "torch_version": "2.12.0+cu132",
+  "source_ckpt": "checkpoints/best_mIoU_iter_1600.pth",
+  "ckpt_iter": 1600,
+  "exported_at": "2026-10-30 18:06:36",
+  "verify": {
+    "logit_max_abs_diff": 2.5033950805664062e-05,
+    "mask_agreement_pct": 100.0
+  },
+  "classes": [
+    "floor",
+    "obstacle",
+    "other"
+  ],
+  "decode_in_graph": true,
+  "decode": {
+    "labels": "int32 [N,H,W] argmax(logits, axis=1); first index on ties",
+    "confidence": "float32 [N,H,W] max softmax(logits, axis=1)",
+    "source_onnx": "models/logits/fast_scnn_logits.onnx"
+  },
+  "source_onnx": "models/logits/fast_scnn_decode.onnx",
+  "built_at": "2026-11-01 15:47:34",
+  "build": {
+    "precision": "int8",
+    "build_seconds": 59.1,
+    "engine_size_mb": 2.37,
+    "trt_version": "10.16.2.10",
+    "workspace_mb": 2048,
+    "tf32": null,
+    "layer_precisions": {
+      "FP32": 33,
+      "INT8": 48,
+      "INT32": 1,
+      "total_layers": 82
+    },
+    "calib_type": "entropy",
+    "calib_images": 102,
+    "calib_list": "calib_list.txt",
+    "calib_cache": "models/fast_scnn_decode_int8_entropy.calib",
+    "note": "models/timing.cache 로 보드가 빈 상태에서 빌드. 다른 프로세스가 CPU 를 쓰는 동안 빌드하면 자동 튜닝이 FP16 층을 고를 수 있다 (2026-11-01 15:32 빌드: INT8 7층, 2.69 ms). 빌드 뒤 층 정밀도 수를 확인할 것"
+  }
+}
