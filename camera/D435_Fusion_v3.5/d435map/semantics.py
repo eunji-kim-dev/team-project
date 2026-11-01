@@ -2,6 +2,7 @@
 - .pth    : torch_fastscnn.TorchBackend (PyTorch CPU)
 - .engine : trt_fastscnn.TrtBackend (TensorRT GPU, Jetson). 옆에 deploy 가 만든 <이름>.engine.json 이 있어야 한다.
 두 백엔드 모두 float 로짓 [1,3,H,W] 를 돌려주고, softmax 신뢰도는 여기서 같은 코드로 계산한다.
+- 예외: decode_in_graph 엔진은 (labels, confidence) 튜플을 돌려주고 여기서는 검사만 한다 (GPU 가 디코드).
 """
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,11 +27,12 @@ class SemanticResult:
     model_sha256: str = ""
     confidence: object = None
     model_filename: str = ""
+    timing: object = None   # [Jetson 측정] {prepare_ms, infer_ms, decode_ms}
 
     def record(self):
         return dict(frame_id=self.frame_id, status=self.status, message=self.message,
                     inference_ms=self.inference_ms, model_sha256=self.model_sha256,
-                    model_filename=self.model_filename,
+                    model_filename=self.model_filename,timing=self.timing,
                     classes={"0": "floor", "1": "obstacle", "2": "ceiling/other"})
 
 def validate_spec(spec):
@@ -92,6 +94,18 @@ def decode_prediction(output,spec,shape):
     labels=np.asarray(spec["output"]["class_ids"],np.uint8)[winner]
     return labels,confidence
 
+def decode_in_graph_result(output,spec,shape):
+    # [Jetson 속도] 엔진이 argmax 와 softmax 신뢰도를 그래프 안에서 계산한 경우(decode_in_graph). 값 검사만 하고 그대로 쓴다.
+    labels,confidence=output;inp=spec["input"]
+    if not isinstance(labels,np.ndarray) or not isinstance(confidence,np.ndarray) or labels.shape!=(inp["height"],inp["width"]) or confidence.shape!=labels.shape:
+        raise ValueError(f"Expected decoded labels/confidence at input resolution, got {getattr(labels,'shape',None)}/{getattr(confidence,'shape',None)}")
+    if labels.dtype!=np.uint8 or labels.max(initial=0)>2:raise ValueError("decoded labels must be uint8 channel indices 0..2")
+    if not np.issubdtype(confidence.dtype,np.floating) or not np.isfinite(confidence).all():raise ValueError("SCNN returned NaN/Inf confidence")
+    if labels.shape!=tuple(shape):
+        labels=cv2.resize(labels,(shape[1],shape[0]),interpolation=cv2.INTER_NEAREST)
+        confidence=cv2.resize(confidence,(shape[1],shape[0]),interpolation=cv2.INTER_LINEAR)
+    return np.asarray(spec["output"]["class_ids"],np.uint8)[labels],confidence.astype(np.float32,copy=False)
+
 def decode_logits(output,spec,shape):
     return decode_prediction(output,spec,shape)[0]
 
@@ -152,10 +166,16 @@ class FastSCNN:
         start = time.monotonic()
         try:
             tensor=prepare_input(bgr,self.spec,self.normalize_on_cpu)
+            prepared=time.monotonic()
             output=self.backend(tensor)
-            labels,confidence=decode_prediction(output,self.spec,bgr.shape[:2])
+            inferred=time.monotonic()
+            if isinstance(output,tuple):labels,confidence=decode_in_graph_result(output,self.spec,bgr.shape[:2])
+            else:labels,confidence=decode_prediction(output,self.spec,bgr.shape[:2])
+            done=time.monotonic()
+            # [Jetson 측정] 단계별 시간. 입력 준비(CPU) / 모델 실행(백엔드) / softmax 디코드(CPU). 합이 inference_ms.
+            timing={"prepare_ms":(prepared-start)*1000,"infer_ms":(inferred-prepared)*1000,"decode_ms":(done-inferred)*1000}
             return SemanticResult(labels, frame_id, "OK", self.message,
-                                  (time.monotonic()-start)*1000, self.model_sha256, confidence,self.model_filename)
+                                  (done-start)*1000, self.model_sha256, confidence,self.model_filename,timing)
         except Exception as exc:
             # [v3.5 추가] 예전 마스크를 재사용하지 않는다. 오류는 표시하고 Depth 처리는 계속한다.
             self.net = None

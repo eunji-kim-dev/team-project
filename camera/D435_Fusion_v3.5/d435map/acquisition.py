@@ -4,8 +4,9 @@ import threading
 import time
 
 class LatestAcquisition:
-    def __init__(self,pipeline,capture,calibration,aligner,max_skew_ms,on_capture):
+    def __init__(self,pipeline,capture,calibration,aligner,max_skew_ms,on_capture,poll_wait_s=.003):
         self.pipeline=pipeline;self.capture=capture;self.calibration=calibration
+        self.poll_wait_s=float(poll_wait_s)   # [Jetson 속도] 폴링 사이 대기. 3 ms 면 초당 300회 GIL 을 요구해 처리 스레드를 느리게 한다
         self.aligner=aligner;self.max_skew_ms=max_skew_ms;self.on_capture=on_capture
         self.condition=threading.Condition();self.halt=threading.Event()
         self.latest_capture=None;self.received_frames=0;self.arrivals=deque(maxlen=300)
@@ -31,7 +32,7 @@ class LatestAcquisition:
                     with self.condition:
                         if now-self.last_wait_notice>=.2:
                             self.timeouts+=1;self.last_wait_notice=now
-                    self.halt.wait(.003)
+                    self.halt.wait(self.poll_wait_s)
                     continue
                 start=time.monotonic()
                 with self.condition:self.phase="copy + align";self.phase_since=start

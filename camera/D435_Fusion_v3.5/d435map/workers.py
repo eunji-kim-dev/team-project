@@ -21,6 +21,7 @@ class LatestWorker:
         self.busy_since=None; self.max_processing_ms=0.; self.failures=0; self.last_error=""
         self.cloud_times=deque(maxlen=300); self.map_times=deque(maxlen=300)
         self.scnn_times=deque(maxlen=300)
+        self.on_result=None   # [Jetson 측정] 처리 완료마다 (result, monotonic) 으로 불리는 선택 훅. 잠금 밖에서 호출
         self.thread=threading.Thread(target=self._run,name="RGBD-geometry",daemon=True)
         self.thread.start()
     def request_robot_width(self,width):
@@ -92,6 +93,10 @@ class LatestWorker:
                     self.cloud_times.append(now)
                     if result.stats.get("scnn",{}).get("status")=="OK": self.scnn_times.append(now)
                     if result.stats["map_updated"]: self.map_times.append(now)
+                hook=self.on_result
+                if hook is not None:
+                    try:hook(result,now)
+                    except Exception as exc:print("frame log failed:",exc)
             except Exception as exc:
                 if hasattr(self.processor,"reviewer"):self.processor.reviewer.reset()
                 with self.condition:

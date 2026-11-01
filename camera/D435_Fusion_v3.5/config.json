@@ -4,7 +4,8 @@
     "roll_deg": 0,
     "pitch_deg": 0,
     "yaw_deg": 0,
-    "target_fps": 15
+    "target_fps": 15,
+    "poll_wait_ms": 10
   },
   "depth": {
     "min_m": 0.2,
@@ -72,7 +73,8 @@
     "elevation_deg": 25,
     "show_untextured_points": false,
     "costmap_view": "top",
-    "cloud_mode": "obstacle_low_angle"
+    "cloud_mode": "obstacle_low_angle",
+    "live_render_max_hz": 5
   },
   "semantics": {
     "enabled": true,

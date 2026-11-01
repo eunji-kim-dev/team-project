@@ -1,8 +1,9 @@
 """v3.5 직접 실행 루프. 이전 main/CV 프록시/중복 미리보기/argv 재파싱을 제거."""
 from pathlib import Path
 from datetime import datetime
-import copy,faulthandler,hashlib,json,sys,time,uuid
+import copy,csv,faulthandler,hashlib,json,platform,shutil,subprocess,sys,time,uuid
 import cv2
+import numpy as np
 from . import sensor
 from .engine import Packet
 from .display import Dashboard
@@ -32,6 +33,42 @@ def request_save(saver,root,snapshot,session,cfg,acquisition_health,processing_h
     saved.stats=dict(snapshot.stats,live_health={"acquisition":acquisition_health,"processing":processing_health})
     return saver.submit(root,saved,session)
 
+# [Jetson 측정] 프레임별 단계 시간 CSV. 조건(모델·버전·전력 모드·클럭 고정·설정)은 같은 이름의 .json 에 남긴다.
+FRAME_LOG_COLUMNS=("recorded_at","elapsed_s","frame_id","received_at","input_age_ms","latency_ms","processing_ms",
+    "semantics_ms","scnn_prepare_ms","scnn_infer_ms","scnn_decode_ms","geometry_floor_ms","costmap_ms",
+    "candidate_review_ms","finalize_ms","render_ms","scnn_status","floor_ok","map_updated","point_count",
+    "valid_depth_fraction","acquire_fps","received_frames","dropped_pending","capture_age_ms")
+
+def _tool_output(command,cwd=None):
+    # 보드 전용 명령(nvpmodel, jetson_clocks)이 없는 PC 에서는 unknown. 비대화식(sudo -n)이라 멈추지 않는다.
+    if shutil.which(command[0]) is None:return "unknown"
+    try:return subprocess.run(command,capture_output=True,text=True,timeout=5,cwd=cwd).stdout.strip() or "unknown"
+    except Exception:return "unknown"
+
+def frame_log_conditions(cfg,worker,args):
+    semantic=worker.processor.semantic
+    clocks=_tool_output(["sudo","-n","jetson_clocks","--show"])
+    if clocks=="unknown":clocks=_tool_output(["jetson_clocks","--show"])
+    locked="unknown"
+    for line in clocks.splitlines():
+        if line.strip().startswith("GPU"):
+            fields=dict(part.split("=") for part in line.split() if "=" in part)
+            if "MinFreq" in fields and "MaxFreq" in fields:locked=fields["MinFreq"]==fields["MaxFreq"]
+    return {"started_at":datetime.now().astimezone().isoformat(),"host":platform.node(),"platform":platform.platform(),
+        "python":platform.python_version(),"numpy":np.__version__,"opencv":cv2.__version__,
+        "model":{"file":semantic.model_filename,"sha256":semantic.model_sha256,"status":semantic.status,
+                 "message":semantic.message,"normalize_on_cpu":semantic.normalize_on_cpu},
+        "git_commit":_tool_output(["git","rev-parse","--short","HEAD"],cwd=Path(__file__).resolve().parent),
+        "nvpmodel":_tool_output(["nvpmodel","-q"]).replace("\n"," "),"gpu_clock_locked":locked,
+        "config":{k:cfg[k] for k in ("camera","processing","fusion","semantics","depth","grid","floor") if k in cfg},
+        "args":{k:(str(v) if isinstance(v,Path) else v) for k,v in vars(args).items()},
+        "columns":list(FRAME_LOG_COLUMNS),
+        "note":"processing_ms = semantics+geometry_floor+costmap+finalize (worker thread); latency_ms = capture received -> result done; "
+               "render_ms = last dashboard render at log time (UI thread); dropped_pending = captures replaced before processing"}
+
+def _r(value,digits=2):
+    return None if value is None else round(float(value),digits)
+
 def run_live(cfg,args):
     # [v3.5] 계산/저장 스레드는 한 번 생성하며 재연결 중 모델을 다시 읽지 않는다.
     run_started=time.monotonic();worker=LatestWorker(cfg);saver=SaveWorker(cfg)
@@ -44,6 +81,32 @@ def run_live(cfg,args):
     fault_file=None
     if not faulthandler.is_enabled():
         fault_file=(log_dir/"native_faults.log").open("w",encoding="utf8");faulthandler.enable(fault_file)
+    # [Jetson 측정] 프레임별 로그. 기본 logs/frame_log_latest.csv (+ .json 조건). --frame-log 로 다른 경로.
+    frame_log_path=Path(args.frame_log).expanduser() if getattr(args,"frame_log",None) else log_dir/"frame_log_latest.csv"
+    frame_log_path.parent.mkdir(parents=True,exist_ok=True)
+    frame_log_file=frame_log_path.open("w",newline="",encoding="utf8")
+    frame_log=csv.DictWriter(frame_log_file,fieldnames=FRAME_LOG_COLUMNS);frame_log.writeheader();frame_log_file.flush()
+    frame_log_path.with_suffix(".json").write_text(json.dumps(frame_log_conditions(cfg,worker,args),ensure_ascii=False,indent=2),encoding="utf8")
+    duration=getattr(args,"duration",None)
+
+    def on_result(result,now):
+        # 작업 스레드에서 처리 완료 직후 호출. 화면 갱신보다 처리가 빨라도 프레임을 빠뜨리지 않는다.
+        s=result.stats;stage=s.get("stage_ms",{});scnn=s.get("scnn") or {};timing=scnn.get("timing") or {}
+        acq=acquisition.health() if acquisition else {};proc=worker.health()
+        review=s.get("map_diagnostics",{}).get("candidate_review",{})
+        frame_log.writerow({"recorded_at":datetime.now().astimezone().isoformat(),"elapsed_s":round(now-run_started,3),
+            "frame_id":s["frame_id"],"received_at":s.get("received_at"),"input_age_ms":_r(s.get("input_age_ms")),
+            "latency_ms":_r(s.get("latency_ms")),"processing_ms":_r(s["processing_ms"]),"semantics_ms":_r(stage.get("semantics")),
+            "scnn_prepare_ms":_r(timing.get("prepare_ms")),"scnn_infer_ms":_r(timing.get("infer_ms")),"scnn_decode_ms":_r(timing.get("decode_ms")),
+            "geometry_floor_ms":_r(stage.get("geometry_floor")),"costmap_ms":_r(stage.get("costmap")),
+            "candidate_review_ms":_r(review.get("elapsed_ms")),"finalize_ms":_r(stage.get("finalize")),
+            "render_ms":_r(getattr(dashboard,"last_render_ms",None)),"scnn_status":scnn.get("status"),
+            "floor_ok":result.floor.ok,"map_updated":s.get("map_updated"),"point_count":s.get("point_count"),
+            "valid_depth_fraction":_r(s.get("valid_depth_fraction"),4),"acquire_fps":_r(acq.get("fps")),
+            "received_frames":acq.get("received_frames"),"dropped_pending":proc.get("dropped_pending"),
+            "capture_age_ms":_r(acq.get("capture_age_ms"))})
+        frame_log_file.flush()
+    worker.on_result=on_result
 
     def on_event(event):
         row=dict(event,recorded_at=datetime.now().astimezone().isoformat(),
@@ -73,6 +136,7 @@ def run_live(cfg,args):
 
     def pump(message):
         # [추가] 카메라 재연결 중에도 녹화/정지 및 창 이벤트를 계속 처리한다.
+        if duration and time.monotonic()-run_started>=duration:return False   # [Jetson 측정] --duration
         image=show(dashboard.render(None,status=message,size=window_size(WINDOW,cfg)))
         key=cv2.waitKey(cfg["recovery"]["ui_wait_ms"])&255
         recording_key(key,image)
@@ -116,11 +180,19 @@ def run_live(cfg,args):
                     "queue_policy":"latest one frame, replace older pending input","legacy_runtime_loaded":False}}
             local_acquisition=LatestAcquisition(pipeline,sensor.capture_from_frames,calibration,
                 sensor.rs.align(sensor.rs.stream.color),skew,
-                lambda cap:worker.submit(Packet(cap,calibration,"live",False)))
+                lambda cap:worker.submit(Packet(cap,calibration,"live",False)),
+                poll_wait_s=float(cfg["camera"].get("poll_wait_ms",3))/1000)
             acquisition=local_acquisition;opened=time.monotonic()
+            # [Jetson 속도] 화면은 새 결과·새 캡처·상태 변화가 있을 때만, 최대 view.live_render_max_hz 로 그린다 (1초 heartbeat).
+            # 렌더(numpy)가 GIL 을 잡는 동안 처리 스레드가 멈추므로, 약 40 Hz 렌더가 처리 시간을 거의 두 배로 늘렸다 (docs/app_pipeline.md).
+            # 키 입력 대기(waitKey 15 ms)는 그대로이고 키가 눌리면 바로 다시 그린다. 녹화는 자체 타이머로 마지막 화면을 쓰므로 영향 없음.
+            render_interval=1/max(float(cfg["view"].get("live_render_max_hz",10)),1e-3)
+            last_render=0.;last_shown=None;image=None
             while True:
                 # [v3.5] 새 5패널에 필요한 최신 RGB/완료 결과만 읽는다.
                 # 예전 2분할/Depth 컬러맵/준비 화면의 이중 렌더링은 만들지 않는다.
+                if duration and time.monotonic()-run_started>=duration:
+                    print(f"--duration {duration:g}s reached; stopping");return   # [Jetson 측정]
                 fresh=acquisition.latest();health=acquisition.health();proc_health=worker.health()
                 age=health["capture_completion_age_ms"]
                 if (age is not None and age>8000) or (fresh is None and time.monotonic()-opened>8):
@@ -131,9 +203,14 @@ def run_live(cfg,args):
                 status=worker.error or health.get("error","")
                 if saver.busy:status="SAVING"
                 elif saver.status.startswith("SAVE FAILED"):status=saver.status
-                image=show(dashboard.render(displayed,rates,status,live_capture=fresh,
-                                                    size=window_size(WINDOW,cfg)))
+                shown=(displayed.stats["frame_id"] if displayed else None,health.get("received_frames"),status)
+                now=time.monotonic()
+                if image is None or (shown!=last_shown and now-last_render>=render_interval) or now-last_render>=1.0:
+                    image=show(dashboard.render(displayed,rates,status,live_capture=fresh,
+                                                        size=window_size(WINDOW,cfg)))
+                    last_render=now;last_shown=shown
                 key=cv2.waitKey(15)&255
+                if key!=255:last_shown=None   # 키 입력 뒤에는 바로 다시 그린다 (입력칸 표시)
                 if not window_open():return
                 if recording_key(key,image):continue
                 if dashboard.key(key):
@@ -164,11 +241,14 @@ def run_live(cfg,args):
             record={"elapsed_s":time.monotonic()-run_started,
                 "acquisition":acquisition.health() if acquisition else {},"processing":worker.health(),
                 "device_report":report,"last_result_stats":displayed.stats if displayed else None,
-                "exit_reason":exit_reason,"recovery_events":events,"runtime_architecture":"v3.5 direct"}
+                "exit_reason":exit_reason,"recovery_events":events,"runtime_architecture":"v3.5 direct",
+                "frame_log":str(frame_log_path)}
             (log_dir/"latest_runtime.json").write_text(json.dumps(record,ensure_ascii=False,indent=2),encoding="utf8")
         except Exception as exc:print("Runtime log write failed:",exc)
+        worker.on_result=None
         try:worker.close()
         finally:
+            frame_log_file.close()   # [Jetson 측정] 작업 스레드가 멈춘 뒤 닫는다
             try:saver.close()
             finally:
                 try:recorder.close()
