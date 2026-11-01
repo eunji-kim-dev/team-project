@@ -4,7 +4,7 @@ import time
 import json
 import copy
 import numpy as np
-from .geometry import camera_transform, rays, filtered_depth, colorize
+from .geometry import camera_transform, rays, filtered_depth, colorize,decimate_depth
 from .floor import FloorResult
 from .costmap import LocalGrid,risk_layers
 from .semantics import FastSCNN
@@ -107,6 +107,11 @@ class Processor:
         if c.original_depth.shape!=(cal["depth_intrinsics"]["height"],cal["depth_intrinsics"]["width"]):
             raise ValueError("native-depth dimensions do not match its calibration")
         raw,filtered,valid=filtered_depth(c.original_depth,cal["depth_scale_m"],self.cfg["depth"])
+        decimation=int(self.cfg["depth"].get("decimation",1))
+        if decimation>1:
+            # [Jetson 속도] 깊이 점 수를 1/f² 로. 영상·내부 파라미터를 함께 줄여 이후 단계(지지 검사·후보 검토·가시성)가 그대로 성립한다.
+            raw,filtered,valid,depth_intr=decimate_depth(raw,filtered,valid,cal["depth_intrinsics"],decimation)
+            cal=dict(cal,depth_intrinsics=depth_intr)
         keep=filtered>0
         indices=np.flatnonzero(keep)
         optical=(rays(cal["depth_intrinsics"])*filtered[:,:,None]).reshape(-1,3)[indices]
@@ -277,7 +282,7 @@ class Processor:
                            "geometry_floor":(grid_start-semantics_done)*1000,
                            "costmap":grid_ms,"finalize":(done-grid_start)*1000-grid_ms},
                "latency_ms":None if packet.replay else max(0,(done-c.received_monotonic)*1000),
-               "valid_depth_fraction":float(valid.mean()),"point_count":len(points),
+               "valid_depth_fraction":float(valid.mean()),"point_count":len(points),"depth_decimation":decimation,
                "filtered_removed_pixels":int(valid.sum()-keep.sum()),
                "depth_interpolated_pixels":0,"map_updated":floor.ok,
                "replay":packet.replay,"scnn":semantic.record(),"map_diagnostics":diagnostics}

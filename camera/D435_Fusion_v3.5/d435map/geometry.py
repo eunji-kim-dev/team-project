@@ -101,6 +101,25 @@ def filtered_depth(raw, scale, settings):
         used[count<settings["neighbor_min"]]=0
     return z,used,valid
 
+def decimate_depth(raw, used, valid, intr, factor):
+    """[Jetson 속도] 깊이 영상을 factor×factor 블록마다 한 픽셀로 줄인다 (해상도 낮은 카메라처럼). 내부 파라미터도 같이 줄인다.
+    블록에서 '사용 깊이'가 있는 가장 가까운 픽셀을 고르고, 없으면 원 깊이가 있는 가장 가까운 픽셀을 고른다 (얇고 가까운 물체를 남기는 보수적 선택).
+    고른 픽셀을 블록 중심 광선으로 대표하므로 광선 방향 오차는 최대 (factor-1)/2 픽셀이다."""
+    f = int(factor)
+    if f <= 1:
+        return raw, used, valid, intr
+    h, w = raw.shape; H, W = h // f * f, w // f * f
+    def blocks(a):
+        return a[:H, :W].reshape(H // f, f, W // f, f).transpose(0, 2, 1, 3).reshape(H // f, W // f, f * f)
+    z_used = np.where(blocks(used) > 0, blocks(used), np.inf)
+    z_raw = np.where(blocks(raw) > 0, blocks(raw), np.inf)
+    pick = np.where(np.isfinite(z_used.min(axis=2)), z_used.argmin(axis=2), z_raw.argmin(axis=2))
+    by, bx = np.indices(pick.shape)
+    sy, sx = by * f + pick // f, bx * f + pick % f
+    scaled = dict(intr, width=W // f, height=H // f, fx=intr["fx"] / f, fy=intr["fy"] / f,
+                  ppx=(intr["ppx"] - (f - 1) / 2) / f, ppy=(intr["ppy"] - (f - 1) / 2) / f)
+    return raw[sy, sx], used[sy, sx], valid[sy, sx], scaled
+
 def colorize(optical, color_bgr, calibration):
     # [v3.5 추가] 원본 Depth 점을 R,t로 Color 광학계에 옮긴 후 투영한다.
     ext=calibration["depth_to_color"]

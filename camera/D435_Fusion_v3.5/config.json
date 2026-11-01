@@ -15,7 +15,8 @@
     "bilateral_sigma_m": 0.025,
     "neighbor_outlier": false,
     "neighbor_delta_m": 0.04,
-    "neighbor_min": 2
+    "neighbor_min": 2,
+    "decimation": 1
   },
   "floor": {
     "seed_height_tolerance_m": 0.2,
