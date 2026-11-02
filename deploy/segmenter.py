@@ -47,6 +47,8 @@ class BaseSegmenter:
         raise NotImplementedError
 
     def _postprocess(self, output: np.ndarray, orig_h: int, orig_w: int) -> np.ndarray:
+        if isinstance(output, tuple):   # decode_in_graph 엔진: 첫 출력(labels)이 마스크
+            output = output[0]
         if self.out_is_mask is None:
             self.out_is_mask = output.ndim == 3 or (output.ndim == 4 and output.shape[1] == 1)
 
@@ -134,24 +136,28 @@ class TrtSegmenter(BaseSegmenter):
         names = [self.engine.get_tensor_name(i) for i in range(self.engine.num_io_tensors)]
         inputs = [n for n in names if self.engine.get_tensor_mode(n) == trt.TensorIOMode.INPUT]
         outputs = [n for n in names if self.engine.get_tensor_mode(n) == trt.TensorIOMode.OUTPUT]
-        if len(inputs) != 1 or len(outputs) != 1:
-            raise ValueError(f"입력 1개·출력 1개 엔진만 지원함 (입력 {inputs}, 출력 {outputs})")
-        self.in_name, self.out_name = inputs[0], outputs[0]
+        if len(inputs) != 1 or not outputs:
+            raise ValueError(f"입력 1개 엔진만 지원함 (입력 {inputs}, 출력 {outputs})")
+        self.in_name = inputs[0]
+        self.out_names = outputs           # 출력이 여럿이면 (예: decode_in_graph 엔진의 labels, confidence) 순서대로
+        self.out_name = outputs[0]
         self.in_shape = tuple(int(v) for v in self.engine.get_tensor_shape(self.in_name))
-        self.out_shape = tuple(int(v) for v in self.engine.get_tensor_shape(self.out_name))
         self.in_dtype = trt.nptype(self.engine.get_tensor_dtype(self.in_name))
-        out_dtype = trt.nptype(self.engine.get_tensor_dtype(self.out_name))
         if self.in_shape[-2:] != (self.spec.height, self.spec.width):
             raise ValueError(f"엔진 입력 {self.in_shape} ≠ spec {self.spec.height}x{self.spec.width}")
 
         # 버퍼는 한 번만 만들고 매 프레임 재사용
         self.host_in = cu.pinned_empty(self.in_shape, self.in_dtype)
-        self.host_out = cu.pinned_empty(self.out_shape, out_dtype)
         self.dev_in = cu.DeviceBuffer(self.host_in.nbytes)
-        self.dev_out = cu.DeviceBuffer(self.host_out.nbytes)
+        self.host_outs = [cu.pinned_empty(tuple(int(v) for v in self.engine.get_tensor_shape(name)),
+                                          trt.nptype(self.engine.get_tensor_dtype(name))) for name in outputs]
+        self.dev_outs = [cu.DeviceBuffer(host.nbytes) for host in self.host_outs]
+        self.host_out, self.dev_out = self.host_outs[0], self.dev_outs[0]   # 출력 하나인 기존 코드용
+        self.out_shape = tuple(self.host_out.shape)
         self.stream = cu.Stream()
         self.context.set_tensor_address(self.in_name, self.dev_in.ptr)
-        self.context.set_tensor_address(self.out_name, self.dev_out.ptr)
+        for name, dev in zip(outputs, self.dev_outs):
+            self.context.set_tensor_address(name, dev.ptr)
 
     @property
     def device_memory_bytes(self) -> int:
@@ -166,16 +172,19 @@ class TrtSegmenter(BaseSegmenter):
         self.cu.memcpy_h2d_async(self.dev_in.ptr, self.host_in, self.stream)      # 호스트 → GPU
         if not self.context.execute_async_v3(self.stream.handle):                 # 추론
             raise RuntimeError("TensorRT execute_async_v3 실패")
-        self.cu.memcpy_d2h_async(self.host_out, self.dev_out.ptr, self.stream)    # GPU → 호스트
+        for host, dev in zip(self.host_outs, self.dev_outs):                       # GPU → 호스트
+            self.cu.memcpy_d2h_async(host, dev.ptr, self.stream)
         self.stream.synchronize()
-        return self.host_out   # 다음 run() 때 덮어써지는 버퍼. 보관하려면 copy()
+        # 다음 run() 때 덮어써지는 버퍼. 보관하려면 copy(). 출력이 여럿이면 out_names 순서의 튜플
+        return self.host_out if len(self.host_outs) == 1 else tuple(self.host_outs)
 
     def close(self):
         self.context = None   # 버퍼 지우기 전에 컨텍스트부터 놓음
-        for name in ("dev_in", "dev_out"):
-            buffer = getattr(self, name, None)
+        buffers = [getattr(self, "dev_in", None)] + list(getattr(self, "dev_outs", []) or [])
+        for buffer in buffers:
             if buffer is not None:
                 buffer.free()
+        self.dev_outs = []
         self.engine = None
 
 

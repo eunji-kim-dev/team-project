@@ -91,7 +91,7 @@ def prepare_output(path=None,project_root=None):
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config",type=Path,help="JSON override; defaults to bundled config.json")
-    parser.add_argument("--models-dir",type=Path,help="Folder with exactly one .pth OR .engine and standard_fastscnn.json; default: models")
+    parser.add_argument("--models-dir",type=Path,help="Folder with exactly one compatible model (.pth for PyTorch CPU, or .engine for TensorRT: with the deploy-made <name>.engine.json beside it, or using the engine block in standard_fastscnn.json) and standard_fastscnn.json; default: models")
     parser.add_argument("--check-model",action="store_true",help="Check model I/O and run one synthetic inference without camera or GUI")
     parser.add_argument("--output",type=Path,help="Save root (created if missing); default: captures in the project folder")
     parser.add_argument("--fps",type=int,help="Explicit acquisition FPS, no fallback when set")
@@ -105,6 +105,8 @@ def main():
     parser.add_argument("--limit",type=int)
     parser.add_argument("--sequence",action="store_true",help="Chronological frames: short candidate history, current-frame map")
     parser.add_argument("--sequence-fixed",action="store_true",help="Only for chronological frames at ONE fixed pose")
+    parser.add_argument("--duration",type=float,help="[measurement] Live mode: quit automatically after this many seconds")
+    parser.add_argument("--frame-log",type=Path,help="[measurement] Live mode: per-frame stage timing CSV (default logs/frame_log_latest.csv; conditions in the .json next to it)")
     args=parser.parse_args()
     if args.limit is not None and args.limit<1: parser.error("--limit must be positive")
     cfg=load_config(args.config)

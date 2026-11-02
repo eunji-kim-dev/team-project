@@ -110,30 +110,31 @@ class LocalGrid:
         if obstacle_depth is not None:
             blockers=cv2.erode(np.where(obstacle_depth>0,obstacle_depth,np.inf).astype(np.float32),
                               np.ones((3,3),np.uint8),borderType=cv2.BORDER_CONSTANT,borderValue=float("inf"))
-        obstacle_blocked=np.zeros(len(cells),bool)
-        valid=np.ones(len(cells),bool)
-        outside=np.zeros(len(cells),bool);missing=outside.copy();blocked=outside.copy()
-        # 배열 크기와 지연을 줄여 분할 검사하고, 한 높이라도 가려짐/결측이면 미확인으로 둔다.
-        for offset in offsets:
-            qxy=xy+offset
-            floor_z=-(qxy@n[:2]+plane.offset_m)/n[2]
-            p=np.empty((len(cells),len(heights),3),np.float32)
-            p[:,:,:2]=qxy[:,None,:]
-            p[:,:,2]=floor_z[:,None]+heights[None,:]
-            optical=(p-T[:3,3])@T[:3,:3]
-            uv=project(optical,intr)
-            u,v=np.rint(uv).astype(np.int32).transpose(2,0,1)
-            ok=(optical[:,:,2]>0)&(u>=1)&(u<depth_m.shape[1]-1)&(v>=1)&(v<depth_m.shape[0]-1)
-            measured=min_depth[np.clip(v,0,depth_m.shape[0]-1),np.clip(u,0,depth_m.shape[1]-1)]
-            if blockers is not None:
-                blocker=blockers[np.clip(v,0,depth_m.shape[0]-1),np.clip(u,0,depth_m.shape[1]-1)]
-                obstacle_blocked |= np.any(ok&np.isfinite(blocker)&(optical[:,:,2]+g["free_depth_margin_m"]>=blocker),axis=1)
-            # [v3.5 추가] 바닥 인식 성공과 통과 공간 검사 실패를 구분하는 진단 수치.
-            outside|=np.any(~ok,axis=1)
-            missing|=np.any(ok&(measured<=0),axis=1)
-            blocked|=np.any(ok&(measured>0)&(optical[:,:,2]+g["free_depth_margin_m"]>=measured),axis=1)
-            ok&=(measured>0)&(optical[:,:,2]+g["free_depth_margin_m"]<measured)
-            valid&=np.all(ok,axis=1)
+        # [Jetson 속도] 다섯 표본 위치(중앙+네 모서리)를 파이썬 루프 대신 한 배열(5, 셀, 높이)로 계산한다.
+        # 모든 연산이 원소별이고 마지막에 OR/AND 로 합치므로 결과는 루프와 같다.
+        W,H=depth_m.shape[1],depth_m.shape[0]
+        qxy=xy[None,:,:]+offsets[:,None,:]                                  # (5, C, 2)
+        floor_z=-(qxy@n[:2]+plane.offset_m)/n[2]                            # (5, C)
+        p=np.empty((len(offsets),len(cells),len(heights),3),np.float32)
+        p[...,:2]=qxy[:,:,None,:]
+        p[...,2]=floor_z[:,:,None]+heights[None,None,:]
+        optical=(p-T[:3,3])@T[:3,:3]
+        uv=project(optical,intr)
+        iuv=np.rint(uv).astype(np.int32);u=iuv[...,0];v=iuv[...,1]
+        ok=(optical[...,2]>0)&(u>=1)&(u<W-1)&(v>=1)&(v<H-1)
+        cv=np.clip(v,0,H-1);cu=np.clip(u,0,W-1)
+        measured=min_depth[cv,cu]
+        ahead=optical[...,2]+g["free_depth_margin_m"]
+        if blockers is not None:
+            blocker=blockers[cv,cu]
+            obstacle_blocked=np.any(ok&np.isfinite(blocker)&(ahead>=blocker),axis=(0,2))
+        else:obstacle_blocked=np.zeros(len(cells),bool)
+        # [v3.5 추가] 바닥 인식 성공과 통과 공간 검사 실패를 구분하는 진단 수치.
+        outside=np.any(~ok,axis=(0,2))
+        missing=np.any(ok&(measured<=0),axis=(0,2))
+        blocked=np.any(ok&(measured>0)&(ahead>=measured),axis=(0,2))
+        ok&=(measured>0)&(ahead<measured)
+        valid=np.all(ok,axis=(0,2))
         if blockers is None:obstacle_blocked=blocked.copy()
         self.free_diagnostics.update(obstacle_occluded_cells=int(obstacle_blocked.sum()),
             out_of_view_cells=int(outside.sum()),

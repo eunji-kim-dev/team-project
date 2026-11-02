@@ -1,4 +1,12 @@
-"""고정 표준 설정 + 단일 PTH/TensorRT engine으로 동일 RGB 프레임을 추론."""
+"""고정 표준 설정 + models 폴더의 단일 모델 파일(.pth 또는 .engine)로 동일 RGB 프레임을 추론. 오류 시 마스크를 만들지 않는다.
+- .pth    : torch_fastscnn.TorchBackend (PyTorch CPU)
+- .engine : TensorRT GPU (Jetson). 옆에 deploy 가 만든 <이름>.engine.json 매니페스트가 있는지로 백엔드를 고른다.
+  - 있음 → trt_fastscnn.TrtBackend. float 로짓 [1,3,H,W] (softmax 신뢰도는 여기서 계산) 또는
+           decode_in_graph 엔진의 (labels, confidence) 튜플 (GPU 가 디코드, 여기서는 검사만).
+  - 없음 → tensorrt_backend.TensorRTBackend. standard_fastscnn.json 의 "engine" 계약(normalize_in_graph,
+           output_kind labels|logits, hard_label_fusion)을 따른다. labels 엔진은 확률이 없으므로 evidence_kind 로
+           구분하고 fusion 에는 fusion_scores() 가 1.0 을 넘긴다.
+"""
 from dataclasses import dataclass
 from pathlib import Path
 import hashlib
@@ -9,7 +17,8 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 STANDARD_SPEC_NAME = "standard_fastscnn.json"
-MODEL_SUFFIXES = {".pth", ".engine"}
+# [Jetson] 모델 파일로 인정하는 확장자. 폴더에 이 중 정확히 하나만 있어야 한다.
+MODEL_SUFFIXES = (".pth", ".engine")
 
 @dataclass
 class SemanticResult:
@@ -21,13 +30,14 @@ class SemanticResult:
     model_sha256: str = ""
     confidence: object = None
     model_filename: str = ""
+    timing: object = None   # [Jetson 측정] {prepare_ms, infer_ms, decode_ms}
     evidence_kind: str = "softmax"
     backend_info: object = None
 
     def record(self):
         return dict(frame_id=self.frame_id, status=self.status, message=self.message,
                     inference_ms=self.inference_ms, model_sha256=self.model_sha256,
-                    model_filename=self.model_filename,
+                    model_filename=self.model_filename,timing=self.timing,
                     evidence_kind=self.evidence_kind, backend_info=self.backend_info,
                     confidence_available=self.confidence is not None,
                     classes={"0": "floor", "1": "obstacle", "2": "ceiling/other"})
@@ -77,6 +87,7 @@ def prepare_input(bgr, spec, normalize=True):
         resized = resized[:, :, ::-1]
     # [v3.5] 정규화 연산 순서는 유지하고 3채널 임시 배열의 반복 할당을 줄인다.
     x = resized.astype(np.float32)
+    # [Jetson] normalize_in_graph 엔진은 normalize=False: 0~255 그대로 넘기고 scale/mean/std 는 GPU 그래프가 적용한다.
     if normalize:
         x *= np.float32(inp["scale"])
         x -= np.asarray(inp["mean"],np.float32)
@@ -104,6 +115,18 @@ def decode_prediction(output,spec,shape):
     labels=np.asarray(spec["output"]["class_ids"],np.uint8)[winner]
     return labels,confidence
 
+def decode_in_graph_result(output,spec,shape):
+    # [Jetson 속도] 엔진이 argmax 와 softmax 신뢰도를 그래프 안에서 계산한 경우(decode_in_graph). 값 검사만 하고 그대로 쓴다.
+    labels,confidence=output;inp=spec["input"]
+    if not isinstance(labels,np.ndarray) or not isinstance(confidence,np.ndarray) or labels.shape!=(inp["height"],inp["width"]) or confidence.shape!=labels.shape:
+        raise ValueError(f"Expected decoded labels/confidence at input resolution, got {getattr(labels,'shape',None)}/{getattr(confidence,'shape',None)}")
+    if labels.dtype!=np.uint8 or labels.max(initial=0)>2:raise ValueError("decoded labels must be uint8 channel indices 0..2")
+    if not np.issubdtype(confidence.dtype,np.floating) or not np.isfinite(confidence).all():raise ValueError("SCNN returned NaN/Inf confidence")
+    if labels.shape!=tuple(shape):
+        labels=cv2.resize(labels,(shape[1],shape[0]),interpolation=cv2.INTER_NEAREST)
+        confidence=cv2.resize(confidence,(shape[1],shape[0]),interpolation=cv2.INTER_LINEAR)
+    return np.asarray(spec["output"]["class_ids"],np.uint8)[labels],confidence.astype(np.float32,copy=False)
+
 def decode_logits(output,spec,shape):
     return decode_prediction(output,spec,shape)[0]
 
@@ -127,50 +150,68 @@ class FastSCNN:
         self.spec = None
         self.model_sha256 = ""
         self.model_filename = ""
+        self.normalize_on_cpu = True
         self.is_engine=False
         self.evidence_kind="softmax"
         self.backend_info=None
+        self.decoder=decode_prediction   # 로짓 → (labels, softmax 신뢰도). labels 전용 엔진은 decode_mask
         self.status, self.message = "DISABLED", "SCNN disabled in config"
         if not cfg["enabled"]:
             return
         try:
             directory=Path(cfg["model_dir"]).expanduser()
             if not directory.is_absolute():directory=ROOT/directory
-            # [engine 추가] 바로 아래의 .pth + .engine 합계. 혼합 2개도 임의 선택하지 않는다.
+            # [수정] 시작할 때 바로 아래의 실제 모델 파일(.pth/.engine)만 센다. 하위 폴더/다른 확장자(.json 등)는 제외. 혼합 2개도 임의 선택하지 않는다.
             if not directory.exists():
                 candidates=[]
             else:
                 candidates=sorted((p for p in directory.iterdir() if p.is_file() and p.suffix.lower() in MODEL_SUFFIXES),
                                   key=lambda p:p.name.lower())
+            kinds="/".join(MODEL_SUFFIXES)
             if not candidates:
-                self.status,self.message="MODEL MISSING","missing model: keep exactly one .pth OR .engine in "+str(directory)
+                self.status,self.message="MODEL MISSING",f"missing model: keep exactly one compatible {kinds} file in "+str(directory)
                 return
             if len(candidates)>1:
-                self.status,self.message="TOO MUCH MODEL",f"too much model: {len(candidates)} .pth/.engine files found; keep exactly one in "+str(directory)
+                self.status,self.message="TOO MUCH MODEL",f"too much model: {len(candidates)} model files ({kinds}) found; keep exactly one in "+str(directory)
                 return
             path=candidates[0]
             self.model_filename=path.name
-            # [수정] PTH 이름과 관계없이 같은 표준 JSON을 사용한다.
+            # [수정] 모델 이름과 관계없이 같은 표준 JSON을 사용한다.
             self.spec=validate_spec(json.loads((directory/STANDARD_SPEC_NAME).read_text(encoding="utf-8-sig")))
             # 고정 JSON의 예전 모델 해시와 비교하지 않음. 실제 사용 파일의 해시는 촬영 이력에 기록.
             self.model_sha256=hashlib.sha256(path.read_bytes()).hexdigest()
-            self.is_engine=path.suffix.lower()==".engine"
-            if self.is_engine:
-                if "engine" not in self.spec:
-                    raise ValueError("standard_fastscnn.json needs the engine input/output contract")
-                from .tensorrt_backend import TensorRTBackend
-                self.backend=TensorRTBackend(path,self.spec)
-                self.backend_info=self.backend.info
-                if self.spec["engine"]["output_kind"]=="labels":
-                    self.evidence_kind="hard_labels" if self.spec["engine"]["hard_label_fusion"] else "labels_only"
-                description="TensorRT "+self.backend.info["tensorrt_version"]+" | "+self.spec["engine"]["output_kind"]
+            if path.suffix.lower()==".engine":
+                self.is_engine=True
+                manifest=path.with_suffix(path.suffix+".json")
+                if manifest.exists():
+                    # [Jetson] deploy 가 만든 <이름>.engine.json 이 있으면 저장소 deploy/segmenter 기반 백엔드.
+                    # 로짓 또는 decode_in_graph(labels+confidence) 엔진. 매니페스트 검증(입력 사양 일치/로짓 출력)은 백엔드가 한다.
+                    from .trt_fastscnn import TrtBackend
+                    self.backend=TrtBackend(path,self.spec)
+                    self.normalize_on_cpu=not self.backend.normalize_in_graph
+                    self.backend_info={"backend":"tensorrt","manifest":manifest.name,"tensorrt_version":self.backend.trt_version,
+                                       "precision":self.backend.precision,"decode_in_graph":self.backend.decode_in_graph}
+                    label="Team FastSCNN | "+self.backend.describe()
+                else:
+                    # [engine 추가] 매니페스트 없는 엔진: standard_fastscnn.json 의 engine 계약을 따른다 (cuda-python 런타임).
+                    if "engine" not in self.spec:
+                        raise ValueError("standard_fastscnn.json needs the engine input/output contract (or put the deploy-made .engine.json next to the engine)")
+                    from .tensorrt_backend import TensorRTBackend
+                    self.backend=TensorRTBackend(path,self.spec)
+                    self.backend_info=self.backend.info
+                    self.normalize_on_cpu=not self.spec["engine"]["normalize_in_graph"]
+                    if self.spec["engine"]["output_kind"]=="labels":
+                        self.decoder=decode_mask
+                        self.evidence_kind="hard_labels" if self.spec["engine"]["hard_label_fusion"] else "labels_only"
+                    label="TensorRT "+self.backend.info["tensorrt_version"]+" | "+self.spec["engine"]["output_kind"]
             else:
                 from .torch_fastscnn import TorchBackend
                 self.backend=TorchBackend(path,cfg.get("torch_threads",2))
+                self.normalize_on_cpu=True
                 self.backend_info={"backend":"pytorch","device":"cpu"}
-                description="Team FastSCNN | PyTorch CPU"
+                label="Team FastSCNN | PyTorch CPU"
             self.net=self.backend
-            self.status,self.message="READY",path.name+" | "+description
+            self.status,self.message="READY",path.name+" | "+label
         except Exception as exc:
             self.net=None;self.backend=None
             self.status,self.message="MODEL ERROR",str(exc)
@@ -181,14 +222,19 @@ class FastSCNN:
                                   model_sha256=self.model_sha256,model_filename=self.model_filename)
         start = time.monotonic()
         try:
-            normalize=not (self.is_engine and self.spec["engine"]["normalize_in_graph"])
-            tensor=prepare_input(bgr,self.spec,normalize=normalize)
+            tensor=prepare_input(bgr,self.spec,self.normalize_on_cpu)
+            prepared=time.monotonic()
             output=self.backend(tensor)
-            decoder=decode_mask if self.is_engine and self.spec["engine"]["output_kind"]=="labels" else decode_prediction
-            labels,confidence=decoder(output,self.spec,bgr.shape[:2])
+            inferred=time.monotonic()
+            # decode_in_graph 엔진은 (labels, confidence) 튜플 → 검사만. 그 외는 백엔드에 맞춘 디코더 (로짓 softmax 또는 argmax 마스크).
+            if isinstance(output,tuple):labels,confidence=decode_in_graph_result(output,self.spec,bgr.shape[:2])
+            else:labels,confidence=self.decoder(output,self.spec,bgr.shape[:2])
+            done=time.monotonic()
+            # [Jetson 측정] 단계별 시간. 입력 준비(CPU) / 모델 실행(백엔드) / 디코드(CPU). 합이 inference_ms.
+            timing={"prepare_ms":(prepared-start)*1000,"infer_ms":(inferred-prepared)*1000,"decode_ms":(done-inferred)*1000}
             return SemanticResult(labels, frame_id, "OK", self.message,
-                                  (time.monotonic()-start)*1000, self.model_sha256, confidence,self.model_filename,
-                                  self.evidence_kind,self.backend_info)
+                                  (done-start)*1000, self.model_sha256, confidence,self.model_filename,
+                                  timing=timing,evidence_kind=self.evidence_kind,backend_info=self.backend_info)
         except Exception as exc:
             # [v3.5 추가] 예전 마스크를 재사용하지 않는다. 오류는 표시하고 Depth 처리는 계속한다.
             self.net = None

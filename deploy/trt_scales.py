@@ -121,7 +121,8 @@ def onnx_conv_inputs(fp32_onnx: Path) -> dict[str, dict]:
         name = node_to_module(node.name)
         if name in convs:
             raise ValueError(f"{fp32_onnx}: 모듈 {name} 에 Conv 노드가 둘 ({convs[name]['node']}, {node.name})")
-        convs[name] = {"node": node.name, "tensor": node.input[0], "weight_shape": dims.get(node.input[1])}
+        convs[name] = {"node": node.name, "tensor": node.input[0], "weight_shape": dims.get(node.input[1]),
+                       "output": node.output[0]}   # output: Add 입력 등 독립 양자화기(ActQuantizer.source) 대응용
     return convs
 
 
@@ -140,13 +141,26 @@ def match_trt_scales(model, calib_path: Path, fp32_onnx: Path) -> dict:
             problems.append(f"{short_name(name)}: 입력 텐서 {info['tensor']} 가 캐시에 없음")
         else:
             scales[name] = {"tensor": info["tensor"], "scale": entries[info["tensor"]], "onnx_node": info["node"]}
+    # conv 입력이 아닌 독립 양자화기 (quant.quantize_fusion_add 의 lower_quant 등). source = ("conv_output", conv 모듈 이름)
+    extra = {}
+    for name, quantizer in quant.named_extra_quantizers(model):
+        kind, ref = quantizer.source
+        info = convs.get(ref)
+        if kind != "conv_output":
+            problems.append(f"{short_name(name)}: 모르는 source 종류 {kind}")
+        elif info is None:
+            problems.append(f"{short_name(name)}: FP32 ONNX 에 conv {ref} 가 없음")
+        elif info["output"] not in entries:
+            problems.append(f"{short_name(name)}: conv 출력 텐서 {info['output']} 가 캐시에 없음")
+        else:
+            extra[name] = {"tensor": info["output"], "scale": entries[info["output"]], "onnx_node": info["node"]}
     if problems:
         raise ValueError(f"TensorRT 캐시 대응 실패 ({len(problems)}개):\n  " + "\n  ".join(problems))
-    used = {v["tensor"] for v in scales.values()}
+    used = {v["tensor"] for v in scales.values()} | {v["tensor"] for v in extra.values()}
     return {"cache": cache_provenance(calib_path, header, len(entries)), "fp32_onnx": str(fp32_onnx),
-            "n_onnx_convs": len(convs), "n_matched": len(scales), "n_cache_entries": len(entries),
+            "n_onnx_convs": len(convs), "n_matched": len(scales), "n_extra": len(extra), "n_cache_entries": len(entries),
             "unused_cache_tensors": sorted(set(entries) - used),   # conv 입력이 아닌 텐서. 정상
-            "scales": scales}
+            "scales": scales, "extra_scales": extra}
 
 
 @torch.no_grad()
@@ -156,6 +170,11 @@ def apply_trt_scales(model, matched: dict, only: list[str] | None = None) -> lis
     targets = select_convs(list(convs), only)
     for name in targets:
         convs[name].input_quant.scale.fill_(matched["scales"][name]["scale"])
+    if not only or "all" in only:   # 독립 양자화기(Add 입력)는 전체 적용일 때 함께
+        extras = dict(quant.named_extra_quantizers(model))
+        for name, info in matched.get("extra_scales", {}).items():
+            extras[name].scale.fill_(info["scale"])
+            targets.append(name)
     return targets
 
 
@@ -171,9 +190,10 @@ def describe(matched: dict, applied: list[str] | None = None, act_scales: dict[s
              f"{cache.get('calib_type', '?')} {cache.get('calib_images', '?')}장, sha256 {cache['sha256_16']})",
              f"FP32 ONNX {matched['fp32_onnx']}: Conv {matched['n_onnx_convs']}개 ↔ QuantConv2d {matched['n_matched']}개 대응, "
              f"캐시의 나머지 {len(matched['unused_cache_tensors'])}개 항목은 conv 입력이 아닌 텐서"]
-    for name, info in matched["scales"].items():
+    rows = list(matched["scales"].items()) + list(matched.get("extra_scales", {}).items())
+    for name, info in rows:
         row = f"  {short_name(name):40s} {info['tensor']:70s} {info['scale']:.5g}"
-        if act_scales is not None:
+        if act_scales is not None and name in act_scales:
             row += f"   기존/TRT {act_scales[name] / info['scale']:.2f}"
         if applied is not None:
             row += "   ← 적용" if name in applied else "   (EMA 유지)"

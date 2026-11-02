@@ -1,3 +1,5 @@
+# 저장소 전체에서 이 파일 하나만 쓴다. 하위 폴더에 .gitignore 를 따로 만들지 않는다.
+
 # ---------- 파이썬 기본 ----------
 __pycache__/
 *.py[cod]
@@ -10,11 +12,12 @@ dist/
 .ruff_cache/
 .ipynb_checkpoints/
 
-# ---------- 가상환경 ----------
+# ---------- 가상환경 / 동봉 런타임 ----------
 .venv/
 venv/
 env/
 .env
+camera/D435_Fusion_v3.5/runtime/
 
 # ---------- 에디터 / OS ----------
 .vscode/
@@ -22,29 +25,30 @@ env/
 .DS_Store
 Thumbs.db
 tempCodeRunnerFile.py
+# 예외: 카메라 앱의 이식용 VS Code 실행 설정(launch/settings/extensions)은 올린다
+!camera/D435_Fusion_v3.5/.vscode/
 
-# ---------- 프로젝트 산출물 (크거나 보드 전용이라 깃에 안 올림) ----------
-# 데이터 (사진 50MB. 원본 zip 은 드라이브에)
+# ---------- 데이터 / 체크포인트 (크거나 드라이브에 원본이 있음) ----------
 data/
 skyview*.zip
-
-# 모델 체크포인트
 checkpoints/
 *.pth
+# 예외: 카메라 앱이 바로 쓰는 작은 state_dict 가중치는 올릴 수 있다
+!camera/D435_Fusion_v3.5/models/*.pth
 
-# 변환 산출물. .engine 은 만든 보드·TensorRT 버전 전용이라 공유 의미 없음
-models/**/*.onnx
-models/**/*.engine
-models/**/*.trt
-models/**/*.plan
-models/**/*.calib
-models/**/timing.cache
+# ---------- 변환 산출물 (.engine 은 만든 보드·TensorRT 버전 전용이라 공유 의미 없음) ----------
+# 어느 폴더에 있어도 무시. 옆의 <이름>.onnx.json / <이름>.engine.json 매니페스트는 작으니 올린다.
+*.onnx
+*.engine
+*.trt
+*.plan
+*.calib
+timing.cache
 
-# 벤치·학습 결과, 로그
+# ---------- 측정 결과 / 실행 로그 ----------
 results/
 *.log
 calib_list.txt
-
-# ---------- 예외: 이건 올림 ----------
-# 모델 옆 설명 json (입력 사양·클래스·QAT 결과) 은 작고 공유해야 함
-!models/*.json
+# 카메라 앱이 실행마다 새로 쓰는 것 (앱이 폴더를 직접 만든다)
+camera/D435_Fusion_v3.5/captures/
+camera/D435_Fusion_v3.5/logs/

@@ -2,10 +2,14 @@
 - 학습은 float 로 하되 값을 int8 격자에 붙였다 떼는 연산을 끼움 → 모델이 양자화 오차에 익숙해짐
 - 역전파는 반올림 없는 것처럼 통과시킴 (STE)
 - ONNX 로 내보내면 이 연산이 QuantizeLinear → DequantizeLinear (Q/DQ) 가 됨 → TensorRT 가 캘리브레이션 없이 INT8 엔진 만듦
-- TensorRT 규칙: 대칭 양자화, zero_point 0, 활성화는 per-tensor, 가중치는 per-channel(axis 0), Q/DQ 는 conv 입력·가중치에만
-- 쓰는 순서: fuse_conv_bn → quantize_convs → calibrate → 학습 → freeze_for_export → export
+- TensorRT 규칙: 대칭 양자화, zero_point 0, 활성화는 per-tensor, 가중치는 per-channel(axis 0), Q/DQ 는 conv 입력·가중치에
+- Add 도 INT8 로 돌리려면 Add 의 skip 쪽 입력에도 Q/DQ 가 있어야 함 (TensorRT 의 잔차 블록 권장 배치). 없으면 Add 앞 conv 가 FP16 으로
+  출력하고 다음 conv 앞에 변환 커널이 붙어 느려짐 → quantize_residual_adds / quantize_fusion_add 가 넣음 (qat_train 기본 켜짐)
+- 쓰는 순서: fuse_conv_bn → quantize_convs → (quantize_residual_adds, quantize_fusion_add) → calibrate → 학습 → freeze_for_export → export
 """
 from __future__ import annotations
+
+import types
 
 import torch
 import torch.nn as nn
@@ -61,6 +65,7 @@ class ActQuantizer(nn.Module):
         self.method = method
         self.calibrating = False   # True: scale 재는 중 (양자화 안 함)
         self.enabled = True        # False: 이 conv 의 양자화(입력·가중치 둘 다) 끄고 float 통과 (비교용)
+        self.source = None         # conv 입력이 아닌 독립 양자화기의 TensorRT 캐시 대응. 예: ("conv_output", "<QuantConv2d 모듈 이름>")
 
     def forward(self, x):
         if self.calibrating:
@@ -90,6 +95,7 @@ class QuantConv2d(nn.Module):
         self.w_scale_frozen = False   # 학습 중엔 매번 가중치에서 계산, export 땐 상수
         self.act_quant_enabled = True      # False: 입력(활성화) 양자화만 끔 (민감도 분석용)
         self.weight_quant_enabled = True   # False: 가중치 양자화만 끔 (민감도 분석용). 둘 다 끄려면 input_quant.enabled = False
+        self.skip_input_quant = False      # True: 입력을 바깥(잔차 블록)에서 input_quant 로 이미 양자화함 → 여기서 다시 안 함
 
     def weight_scale(self) -> torch.Tensor:
         if self.w_scale_frozen:
@@ -97,10 +103,17 @@ class QuantConv2d(nn.Module):
         amax_per_channel = self.conv.weight.detach().abs().amax(dim=(1, 2, 3))
         return (amax_per_channel / QMAX).clamp_min(1e-8)
 
-    def forward(self, x):
+    def quantize_input(self, x):
+        """입력 양자화(또는 캘리브레이션 관찰). act_quant_enabled 가 꺼져 있으면 그대로"""
         quantizer = self.input_quant
         if quantizer.calibrating or (quantizer.enabled and self.act_quant_enabled):
-            x = quantizer(x)
+            return quantizer(x)
+        return x
+
+    def forward(self, x):
+        quantizer = self.input_quant
+        if not self.skip_input_quant:
+            x = self.quantize_input(x)
         weight_off = quantizer.calibrating or not quantizer.enabled or not self.weight_quant_enabled
         weight = self.conv.weight if weight_off else fake_quant(self.conv.weight, self.weight_scale(), axis=0)
         return F.conv2d(x, weight, self.conv.bias, self.conv.stride, self.conv.padding,
@@ -143,6 +156,72 @@ def quantize_convs(model: nn.Module, skip: tuple[str, ...] = (), *, calib_method
                 setattr(parent, child_name, QuantConv2d(child, calib_method=calib_method).to(child.weight.device))   # 모델이 GPU 면 scale 버퍼도 GPU 에
                 replaced += 1
     return replaced
+
+
+# ---------- Add 양자화 (TensorRT 잔차 블록 권장 배치) ----------
+
+def _first_quant_conv(block) -> "QuantConv2d | None":
+    """잔차 블록 conv 경로의 첫 QuantConv2d. conv[0] 이 QuantConv2d 거나 그걸 감싼 ConvBNAct(.conv) 둘 다 지원"""
+    seq = getattr(block, "conv", None)
+    if not isinstance(seq, nn.Sequential) or len(seq) == 0:
+        return None
+    first = seq[0]
+    if isinstance(first, QuantConv2d):
+        return first
+    inner = getattr(first, "conv", None)
+    return inner if isinstance(inner, QuantConv2d) else None
+
+
+def _residual_forward(self, x):
+    """InvertedResidual(skip 있음): 입력을 conv.0 의 입력 양자화기로 한 번만 양자화해 conv 경로와 skip 경로가 같은 Q/DQ 를 공유.
+    ONNX: x → Q/DQ → [conv.0 …, Add]. TensorRT 는 conv.2 + Add 를 INT8 로 묶고 다음 블록의 Q/DQ 로 INT8 출력한다"""
+    xq = _first_quant_conv(self).quantize_input(x)   # calibrating 이면 통계만 모으고 x 그대로. conv.0 은 skip_input_quant 로 재양자화 안 함
+    return xq + self.conv(xq)
+
+
+def quantize_residual_adds(model: nn.Module) -> int:
+    """fastscnn_mmseg.InvertedResidual 중 skip 연결이 있는 블록(use_res_connect)의 Add 입력을 양자화. 바꾼 블록 수 반환
+    quantize_convs 뒤에 부를 것 (conv.0 안의 conv 가 QuantConv2d 여야 함)"""
+    changed = 0
+    for module in model.modules():
+        first = _first_quant_conv(module) if getattr(module, "use_res_connect", False) else None
+        if first is not None:
+            first.skip_input_quant = True
+            module.forward = types.MethodType(_residual_forward, module)
+            changed += 1
+    return changed
+
+
+def _fusion_forward(self, higher, lower):
+    """FeatureFusionModule: Add 의 lower 쪽 입력(conv_lower_res 출력)에 Q/DQ. TensorRT 는 conv_higher_res + Add + ReLU 를 INT8 로 묶음"""
+    lower = F.interpolate(lower, size=higher.shape[2:], mode="bilinear", align_corners=False)
+    lower = self.lower_quant(self.conv_lower_res(self.dwconv(lower)))
+    higher = self.conv_higher_res(higher)
+    return self.relu(higher + lower)
+
+
+def quantize_fusion_add(model: nn.Module, *, calib_method: str = "ema") -> int:
+    """fastscnn_mmseg.FeatureFusionModule 의 Add 입력(conv_lower_res 출력)에 독립 양자화기 lower_quant 를 둠. 바꾼 모듈 수 반환
+    scale 은 calibrate 가 재거나 trt_scales 가 캐시의 conv_lower_res 출력 텐서 값으로 채움 (source 참고)"""
+    changed = 0
+    for name, module in list(model.named_modules()):
+        if not all(hasattr(module, attr) for attr in ("dwconv", "conv_lower_res", "conv_higher_res", "relu")):
+            continue
+        lower_conv = getattr(module.conv_lower_res, "conv", None)
+        if not isinstance(lower_conv, QuantConv2d):
+            continue
+        quantizer = ActQuantizer(method=calib_method).to(lower_conv.conv.weight.device)
+        quantizer.source = ("conv_output", f"{name}.conv_lower_res.conv" if name else "conv_lower_res.conv")
+        module.lower_quant = quantizer
+        module.forward = types.MethodType(_fusion_forward, module)
+        changed += 1
+    return changed
+
+
+def named_extra_quantizers(model: nn.Module) -> list[tuple[str, ActQuantizer]]:
+    """conv 입력이 아닌 독립 ActQuantizer (source 가 있는 것). 예: core.backbone.feature_fusion.lower_quant"""
+    return [(name, module) for name, module in model.named_modules()
+            if isinstance(module, ActQuantizer) and module.source is not None]
 
 
 def quantizers(model: nn.Module) -> list[ActQuantizer]:

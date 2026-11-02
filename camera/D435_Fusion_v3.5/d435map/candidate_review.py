@@ -2,15 +2,18 @@
 import time
 import numpy as np
 import cv2
-from .obstacle_support import supported_obstacles
+from .obstacle_support import supported_subset
 from .temporal import MotionGuard,CandidateHistory
 
 def local_floor_model(floor_points,center,plane,cfg):
     """후보 자체를 제외한 주변 측정 바닥만 robust least squares로 적합."""
-    dxy=floor_points[:,:2]-center[:2]
+    radius=cfg["local_radius_m"]
+    # [Jetson 속도] dist2<r² 이면 |dx|<r 이므로 x 창으로 먼저 줄여도 같은 점이 같은 순서로 남는다 (전체 점 10만 개 연산을 성분마다 반복하지 않음).
+    source=floor_points[np.abs(floor_points[:,0]-center[0])<radius]
+    dxy=source[:,:2]-center[:2]
     dist2=np.einsum("ij,ij->i",dxy,dxy)
-    choose=(dist2<cfg["local_radius_m"]**2)&(dist2>cfg["local_inner_radius_m"]**2)
-    p=floor_points[choose]
+    choose=(dist2<radius**2)&(dist2>cfg["local_inner_radius_m"]**2)
+    p=source[choose]
     info={"support_points":len(p),"trusted":False}
     if len(p)<cfg["local_min_points"]:return None,info
     if len(p)>cfg["local_max_samples"]:p=p[np.linspace(0,len(p)-1,cfg["local_max_samples"],dtype=int)]
@@ -88,9 +91,9 @@ class CandidateReviewer:
                     local_held[ids[~above]]=True
                     remaining=ids[above]
                     if len(remaining):
-                        candidates=np.zeros(len(points),bool);candidates[remaining]=True
-                        supported,_,_=supported_obstacles(depth,indices,candidates,cfg["obstacle_support"])
-                        local_held[remaining[~supported[remaining]]]=True;remaining=remaining[supported[remaining]]
+                        # [Jetson 속도] 전체 점 길이 배열 대신 해당 성분 점만 검사 (결과 동일)
+                        supported=supported_subset(depth,indices,remaining,cfg["obstacle_support"])
+                        local_held[remaining[~supported]]=True;remaining=remaining[supported]
             if len(remaining):
                 groups.append(remaining);centers.append(points[remaining].mean(0))
             if len(diag["reviewed_components"])<32:diag["reviewed_components"].append(detail)
