@@ -25,5 +25,11 @@
       2
     ]
   },
-  "architecture": "Team MMSegmentation FastSCNN"
+  "architecture": "Team MMSegmentation FastSCNN",
+  "engine": {
+    "normalize_in_graph": true,
+    "output_kind": "labels",
+    "hard_label_fusion": true,
+    "provided_engine_build_version": "10.16.2.10"
+  }
 }

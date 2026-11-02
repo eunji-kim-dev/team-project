@@ -186,7 +186,9 @@ def run_live(cfg,args):
             # [Jetson 속도] 화면은 새 결과·새 캡처·상태 변화가 있을 때만, 최대 view.live_render_max_hz 로 그린다 (1초 heartbeat).
             # 렌더(numpy)가 GIL 을 잡는 동안 처리 스레드가 멈추므로, 약 40 Hz 렌더가 처리 시간을 거의 두 배로 늘렸다 (docs/app_pipeline.md).
             # 키 입력 대기(waitKey 15 ms)는 그대로이고 키가 눌리면 바로 다시 그린다. 녹화는 자체 타이머로 마지막 화면을 쓰므로 영향 없음.
-            render_interval=1/max(float(cfg["view"].get("live_render_max_hz",10)),1e-3)
+            # performance 프로필이 정하는 view.ui_fps 상한도 함께 적용한다 (둘 중 낮은 쪽).
+            render_hz=min(float(cfg["view"].get("live_render_max_hz",10)),float(cfg["view"].get("ui_fps",60)))
+            render_interval=1/max(render_hz,1e-3)
             last_render=0.;last_shown=None;image=None
             while True:
                 # [v3.5] 새 5패널에 필요한 최신 RGB/완료 결과만 읽는다.
@@ -242,7 +244,10 @@ def run_live(cfg,args):
                 "acquisition":acquisition.health() if acquisition else {},"processing":worker.health(),
                 "device_report":report,"last_result_stats":displayed.stats if displayed else None,
                 "exit_reason":exit_reason,"recovery_events":events,"runtime_architecture":"v3.5 direct",
-                "frame_log":str(frame_log_path)}
+                "frame_log":str(frame_log_path),
+                "performance_settings":cfg.get("performance",{}),"last_render_ms":getattr(dashboard,"last_render_ms",None),
+                "render_max_size":cfg["view"].get("render_max_size"),"ui_target_fps":cfg["view"].get("ui_fps",60),
+                "live_render_max_hz":cfg["view"].get("live_render_max_hz",10)}
             (log_dir/"latest_runtime.json").write_text(json.dumps(record,ensure_ascii=False,indent=2),encoding="utf8")
         except Exception as exc:print("Runtime log write failed:",exc)
         worker.on_result=None

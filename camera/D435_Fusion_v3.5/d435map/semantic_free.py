@@ -3,6 +3,7 @@ import numpy as np
 import cv2
 from .geometry import project
 from .costmap import camera_occluded
+from .semantics import fusion_scores
 
 
 def connect_floor_gaps(seeds,eligible,resolution,max_distance_m):
@@ -31,9 +32,12 @@ def projected_floor_free(grid,semantic,frame_id,plane,T,cal,raw,in_view,blocked,
     if not (info["enabled"] and f["enabled"] and plane.ok and config["grid"]["free_space_policy"]=="observed_floor"):
         return out,info
     if semantic is None or semantic.status!="OK" or semantic.frame_id!=frame_id:return out,info
-    labels,score=semantic.labels,semantic.confidence
+    labels=semantic.labels
     expected=(cal["color_intrinsics"]["height"],cal["color_intrinsics"]["width"])
     if not isinstance(labels,np.ndarray) or labels.shape!=expected or labels.dtype!=np.uint8:return out,info
+    score=fusion_scores(semantic)
+    info["evidence_kind"]=semantic.evidence_kind
+    info["confidence_thresholds_applied"]=semantic.evidence_kind=="softmax"
     if not isinstance(score,np.ndarray) or score.shape!=expected or not np.isfinite(score).all() or np.any((score<0)|(score>1)) or labels.max(initial=0)>2:return out,info
     # 기존 5/5 고신뢰도 투영 정책은 유지한다.
     interior=((labels==0)&(score>=f["semantic_free_confidence"])).astype(np.uint8)

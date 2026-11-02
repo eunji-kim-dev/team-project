@@ -1,0 +1,8 @@
+# Jetson Orin Nano: reported TensorRT 10.16.2.10 / CUDA 13.2.
+# Use the SAME Python that can import tensorrt and pyrealsense2.
+# This file adds CUDA Python only. Do not replace JetPack TensorRT/CUDA with desktop wheels.
+# Required existing modules: numpy (>=1.24), cv2 (GUI-enabled), pyrealsense2, tensorrt (10+).
+# Install missing NumPy/OpenCV via the Jetson environment; RealSense needs its Jetson SDK bindings.
+# .engine does NOT require PyTorch; .pth uses the separately installed torch.
+# python3 -m pip install -r requirements-jetson.txt
+cuda-python>=13.2,<13.3

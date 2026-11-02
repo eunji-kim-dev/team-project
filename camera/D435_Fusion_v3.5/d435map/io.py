@@ -56,6 +56,8 @@ def write_ply(path,points,rgb,classes):
         f.write(header.encode("ascii")); f.write(rows.tobytes())
 
 def save_extras(destination,prefix,s,cfg):
+    # [Jetson 경량화] 지연한 RGB 점군/분리 결과를 같은 저장 프레임에서 완성한다.
+    s.ensure_color()
     # [v3.5] 입력칸 변경 전후가 섞이지 않도록 해당 프레임의 설정으로 저장.
     cfg=getattr(s,"applied_config",None) or cfg
     dest=Path(destination)

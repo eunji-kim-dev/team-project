@@ -57,7 +57,10 @@ def pairing_info(depth_info, color_info, max_skew_ms):
 
 # [v3.5] 필요한 calibration_info 기능만 현재 모듈에서 직접 사용.
 def calibration_info(device, depth_profile, color_profile, scale):
-    return {'schema': 'realsense-capture-v2-calibration', 'recorded_at': now_iso(), 'sdk_version': importlib.metadata.version('pyrealsense2'), 'device': device_info(device), 'depth_scale_m': float(scale), 'depth_intrinsics': intrinsics_info(depth_profile), 'color_intrinsics': intrinsics_info(color_profile), 'depth_to_color': extrinsics_info(depth_profile, color_profile), 'color_to_depth': extrinsics_info(color_profile, depth_profile)}
+    # Jetson에서 소스로 빌드한 SDK도 pip 메타데이터 없이 사용할 수 있다.
+    try:version=importlib.metadata.version('pyrealsense2')
+    except importlib.metadata.PackageNotFoundError:version=getattr(rs,'__version__','system build')
+    return {'schema': 'realsense-capture-v2-calibration', 'recorded_at': now_iso(), 'sdk_version': version, 'device': device_info(device), 'depth_scale_m': float(scale), 'depth_intrinsics': intrinsics_info(depth_profile), 'color_intrinsics': intrinsics_info(color_profile), 'depth_to_color': extrinsics_info(depth_profile, color_profile), 'color_to_depth': extrinsics_info(color_profile, depth_profile)}
 
 
 # [v3.5] 필요한 Capture 기능만 현재 모듈에서 직접 사용.
